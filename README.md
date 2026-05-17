@@ -32,6 +32,7 @@ The submodule is pinned to Eclipse S-CORE communication commit `56c36d4059d276e8
 - `bundled`: enables `lola-build-from-source`.
 - `lola-build-from-source`: generates an isolated Bazel workspace under `OUT_DIR`, builds `libup_lola_bridge.so`, and links Cargo against it.
 - `lola-ffi`: enables the Rust FFI backend and expects a prebuilt bridge via `LOLA_BRIDGE_LIB_DIR` unless `lola-build-from-source` is also enabled.
+- `native-smoke`: enables native runtime smoke tests. These use `tests/fixtures/mw_com_config.json` by default.
 - `test-stub`: enables the in-process fake backend for fast Rust unit tests. It is not a LoLa runtime.
 
 ## Build Options
@@ -90,13 +91,19 @@ Run the fake unit-test backend:
 cargo test --no-default-features --features test-stub
 ```
 
-The native end-to-end smoke test is ignored by default because it needs a matching S-CORE `mw_com_config.json` and LoLa shared-memory runtime setup. To run it explicitly, provide the manifest path and matching service names, then run ignored tests:
+The native end-to-end smoke test is compiled only with `native-smoke`. It uses `tests/fixtures/mw_com_config.json` by default. The test is skipped unless `LOLA_NATIVE_SMOKE_RUN=1` is set because LoLa shared-memory runtime setup and loopback behavior are host-dependent:
+
+```sh
+LOLA_NATIVE_SMOKE_RUN=1 \
+BAZEL=/path/to/bazelisk \
+cargo test --features native-smoke
+```
+
+Override the checked-in fixture when needed:
 
 ```sh
 LOLA_NATIVE_SMOKE_CONFIG=/path/to/mw_com_config.json \
-LOLA_NATIVE_SMOKE_INSTANCE_SPECIFIER=uprotocol/transport \
-LOLA_NATIVE_SMOKE_SERVICE_TYPE=/uprotocol/Transport \
-LOLA_NATIVE_SMOKE_EVENT_NAME=frame \
+LOLA_NATIVE_SMOKE_RUN=1 \
 BAZEL=/path/to/bazelisk \
-cargo test -- --ignored
+cargo test --features native-smoke
 ```

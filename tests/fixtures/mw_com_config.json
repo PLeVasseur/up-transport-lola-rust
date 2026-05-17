@@ -1,0 +1,56 @@
+{
+  "serviceTypes": [
+    {
+      "serviceTypeName": "/uprotocol/Transport",
+      "version": {
+        "major": 1,
+        "minor": 0
+      },
+      "bindings": [
+        {
+          "binding": "SHM",
+          "serviceId": 6240,
+          "events": [
+            {
+              "eventName": "frame",
+              "eventId": 1
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "serviceInstances": [
+    {
+      "instanceSpecifier": "uprotocol/transport",
+      "serviceTypeName": "/uprotocol/Transport",
+      "version": {
+        "major": 1,
+        "minor": 0
+      },
+      "instances": [
+        {
+          "instanceId": 1,
+          "asil-level": "QM",
+          "binding": "SHM",
+          "events": [
+            {
+              "eventName": "frame",
+              "numberOfSampleSlots": 8,
+              "maxSubscribers": 4,
+              "numberOfIpcTracingSlots": 0
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "global": {
+    "asil-level": "QM",
+    "queue-size": {
+      "QM-receiver": 8,
+      "QM-sender": 8
+    },
+    "shm-size-calc-mode": "SIMULATION"
+  }
+}

@@ -12,11 +12,12 @@ default = ["bundled"]
 bundled = ["lola-build-from-source"]
 lola-ffi = []
 lola-build-from-source = ["lola-ffi"]
+native-smoke = ["lola-ffi"]
 test-stub = []
 
 [dependencies]
 async-trait = "0.1"
-tokio = { version = "1.45.1", default-features = false, features = ["sync"] }
+tokio = { version = "1.45.1", default-features = false, features = ["rt", "sync", "time"] }
 up-rust = { path = "/home/pete.levasseur/eclipse/uprotocol/up-rust" }
 
 [build-dependencies]

@@ -4,8 +4,10 @@
  * SPDX-License-Identifier: Apache-2.0
  ********************************************************************************/
 
+use std::io::Cursor;
+
 use up_rust::{
-    zero_copy::{UTxBuffer, UZeroCopyRxFrame},
+    zero_copy::{UContiguousZeroCopyRxFrame, UTxBuffer, UZeroCopyRxFrame},
     UAttributes, UCode, UEncoding, UFrameMetadata, UMessageType, UPriority, UStatus, UUri, UUID,
 };
 
@@ -236,26 +238,41 @@ impl LolaRxLease {
 }
 
 impl UZeroCopyRxFrame for LolaRxLease {
+    type PayloadReader<'a>
+        = Cursor<&'a [u8]>
+    where
+        Self: 'a;
+    type PayloadSlices<'a>
+        = std::iter::Once<&'a [u8]>
+    where
+        Self: 'a;
+
     fn metadata(&self) -> &UFrameMetadata {
         &self.metadata
-    }
-
-    fn payload(&self) -> &[u8] {
-        self.payload_contiguous()
-            .expect("LoLa receive payload should be contiguous")
     }
 
     fn payload_len(&self) -> usize {
         self.payload_len
     }
 
-    fn payload_contiguous(&self) -> Option<&[u8]> {
+    fn payload_reader(&self) -> Self::PayloadReader<'_> {
+        Cursor::new(self.contiguous_payload())
+    }
+
+    fn payload_slices(&self) -> Self::PayloadSlices<'_> {
+        std::iter::once(self.contiguous_payload())
+    }
+
+    fn try_contiguous_payload(&self) -> Option<&[u8]> {
         let end = self.payload_offset.checked_add(self.payload_len)?;
         self.sample.as_slice().get(self.payload_offset..end)
     }
+}
 
-    fn for_each_payload_slice(&self, visitor: &mut dyn FnMut(&[u8])) {
-        visitor(self.payload());
+impl UContiguousZeroCopyRxFrame for LolaRxLease {
+    fn contiguous_payload(&self) -> &[u8] {
+        self.try_contiguous_payload()
+            .expect("LoLa receive payload layout should be valid")
     }
 }
 
