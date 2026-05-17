@@ -150,6 +150,12 @@ impl LolaTxLoan {
     #[cfg(feature = "lola-ffi")]
     pub(crate) fn into_native(mut self) -> Result<NativeTxLoan, UStatus> {
         self.refresh_frame_header()?;
+        if self.sample.as_slice().get(..4) != Some(LOLA_FRAME_MAGIC.as_slice()) {
+            return Err(UStatus::fail_with_code(
+                UCode::INTERNAL,
+                "LoLa TX frame header was not written before send",
+            ));
+        }
         match self.sample {
             LolaTxStorage::Native(sample) => Ok(sample),
         }
@@ -327,7 +333,10 @@ fn read_frame_header(sample: &[u8]) -> Result<(UFrameMetadata, usize, usize), US
     if &sample[0..4] != LOLA_FRAME_MAGIC {
         return Err(UStatus::fail_with_code(
             UCode::INVALID_ARGUMENT,
-            "invalid LoLa frame magic",
+            format!(
+                "invalid LoLa frame magic: {:02X} {:02X} {:02X} {:02X}",
+                sample[0], sample[1], sample[2], sample[3]
+            ),
         ));
     }
     if sample[4] != LOLA_FRAME_VERSION {

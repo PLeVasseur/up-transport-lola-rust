@@ -6,11 +6,15 @@
 
 #include "up_lola_bridge.h"
 
+#include "score/mw/com/impl/bindings/lola/event_data_storage.h"
+#include "score/mw/com/impl/bindings/lola/sample_allocatee_ptr.h"
+#include "score/mw/com/impl/plumbing/sample_allocatee_ptr.h"
 #include "score/mw/com/runtime.h"
 #include "score/mw/com/types.h"
 
 #include <algorithm>
 #include <cstring>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -32,6 +36,8 @@ using score::mw::com::GenericSkeletonServiceElementInfo;
 using score::mw::com::InstanceSpecifier;
 using score::mw::com::SampleAllocateePtr;
 using score::mw::com::SamplePtr;
+using score::mw::com::impl::SampleAllocateePtrView;
+using score::mw::com::impl::lola::EventDataStorage;
 
 std::optional<std::string> to_string(const UpLolaStr& value)
 {
@@ -50,6 +56,62 @@ std::optional<std::string> to_string(const UpLolaStr& value)
 bool is_power_of_two(const std::size_t value)
 {
     return value != 0U && (value & (value - 1U)) == 0U;
+}
+
+std::optional<std::size_t> align_up(const std::size_t value, const std::size_t alignment)
+{
+    if (!is_power_of_two(alignment))
+    {
+        return std::nullopt;
+    }
+    const auto remainder = value % alignment;
+    if (remainder == 0U)
+    {
+        return value;
+    }
+    const auto padding = alignment - remainder;
+    if (value > std::numeric_limits<std::size_t>::max() - padding)
+    {
+        return std::nullopt;
+    }
+    return value + padding;
+}
+
+std::uint8_t* generic_sample_data(SampleAllocateePtr<void>& sample,
+                                  const std::size_t sample_size,
+                                  const std::size_t sample_alignment)
+{
+    auto* const skeleton_sample_ptr = static_cast<std::uint8_t*>(sample.Get());
+    if (skeleton_sample_ptr == nullptr)
+    {
+        return nullptr;
+    }
+
+    const SampleAllocateePtrView<void> sample_view{sample};
+    const auto* const lola_sample = sample_view.As<score::mw::com::impl::lola::SampleAllocateePtr<void>>();
+    if (lola_sample == nullptr)
+    {
+        return skeleton_sample_ptr;
+    }
+
+    const auto aligned_sample_size = align_up(sample_size, sample_alignment);
+    if (!aligned_sample_size.has_value())
+    {
+        return nullptr;
+    }
+    const auto slot_index = static_cast<std::size_t>(lola_sample->GetReferencedSlot());
+    if (slot_index > std::numeric_limits<std::size_t>::max() / aligned_sample_size.value())
+    {
+        return nullptr;
+    }
+
+    // GenericSkeletonEvent::Allocate() currently returns the EventDataStorage object base, while GenericProxyEvent
+    // reads from EventMetaInfo::event_slots_raw_array_ (EventDataStorage::data()). Keep the loan object untouched for
+    // Send(), but expose the raw slot storage to Rust so producer and consumer use the same sample bytes.
+    const auto slot_offset = slot_index * aligned_sample_size.value();
+    auto* const storage = reinterpret_cast<EventDataStorage<std::max_align_t>*>(skeleton_sample_ptr - slot_offset);
+    auto* const raw_slots = reinterpret_cast<std::uint8_t*>(storage->data());
+    return raw_slots + slot_offset;
 }
 
 UpLolaStatusCode initialize_runtime_once(const std::string& config_path)
@@ -78,6 +140,7 @@ UpLolaStatusCode initialize_runtime_once(const std::string& config_path)
 struct UpLolaTxLoan
 {
     SampleAllocateePtr<void> sample;
+    std::uint8_t* sample_data;
     std::size_t sample_size;
 };
 
@@ -98,6 +161,70 @@ struct UpLolaTransport
     std::mutex mutex;
     std::optional<GenericSkeleton> skeleton;
     GenericSkeletonEvent* skeleton_event{nullptr};
+    std::optional<GenericProxy> proxy;
+    GenericProxyEvent* proxy_event{nullptr};
+    bool subscribed{false};
+
+    UpLolaStatusCode ensure_proxy_locked()
+    {
+        if (subscribed && proxy_event != nullptr)
+        {
+            return UP_LOLA_STATUS_OK;
+        }
+
+        auto specifier_result = InstanceSpecifier::Create(std::string{instance_specifier});
+        if (!specifier_result.has_value())
+        {
+            return UP_LOLA_STATUS_INVALID_ARGUMENT;
+        }
+
+        auto handles_result = GenericProxy::FindService(std::move(specifier_result).value());
+        if (!handles_result.has_value())
+        {
+            return UP_LOLA_STATUS_INTERNAL;
+        }
+        auto& handles = handles_result.value();
+        if (handles.empty())
+        {
+            return UP_LOLA_STATUS_NOT_FOUND;
+        }
+
+        auto proxy_result = GenericProxy::Create(handles.front());
+        if (!proxy_result.has_value())
+        {
+            return UP_LOLA_STATUS_INTERNAL;
+        }
+        proxy.emplace(std::move(proxy_result).value());
+
+        auto& events = proxy->GetEvents();
+        auto event_it = events.find(std::string_view{event_name});
+        if (event_it == events.cend())
+        {
+            proxy.reset();
+            return UP_LOLA_STATUS_NOT_FOUND;
+        }
+        proxy_event = &event_it->second;
+
+        auto subscribe_result = proxy_event->Subscribe(max_samples);
+        if (!subscribe_result.has_value())
+        {
+            proxy_event = nullptr;
+            proxy.reset();
+            subscribed = false;
+            return UP_LOLA_STATUS_INTERNAL;
+        }
+        subscribed = true;
+        return UP_LOLA_STATUS_OK;
+    }
+};
+
+struct UpLolaSubscriber
+{
+    std::string instance_specifier;
+    std::string event_name;
+    std::size_t sample_size;
+    std::size_t max_samples;
+    std::mutex mutex;
     std::optional<GenericProxy> proxy;
     GenericProxyEvent* proxy_event{nullptr};
     bool subscribed{false};
@@ -259,7 +386,8 @@ UpLolaStatusCode up_lola_transport_reserve(UpLolaTransport* transport, UpLolaTxL
     auto loan = std::make_unique<UpLolaTxLoan>();
     loan->sample = std::move(sample_result).value();
     loan->sample_size = transport->sample_size;
-    auto* data = loan->sample.Get();
+    loan->sample_data = generic_sample_data(loan->sample, transport->sample_size, transport->sample_alignment);
+    auto* data = loan->sample_data;
     if (data == nullptr)
     {
         return UP_LOLA_STATUS_INTERNAL;
@@ -275,7 +403,7 @@ std::uint8_t* up_lola_tx_loan_data(UpLolaTxLoan* loan)
     {
         return nullptr;
     }
-    return static_cast<std::uint8_t*>(loan->sample.Get());
+    return loan->sample_data;
 }
 
 std::size_t up_lola_tx_loan_size(const UpLolaTxLoan* loan)
@@ -340,6 +468,101 @@ UpLolaStatusCode up_lola_transport_receive(UpLolaTransport* transport, UpLolaRxS
     auto sample = std::make_unique<UpLolaRxSample>();
     sample->sample = std::move(received_sample);
     sample->sample_size = transport->sample_size;
+    *out_sample = sample.release();
+    return UP_LOLA_STATUS_OK;
+}
+
+UpLolaStatusCode up_lola_subscriber_create(const UpLolaConfig* config, UpLolaSubscriber** out_subscriber)
+{
+    if (config == nullptr || out_subscriber == nullptr || config->sample_size == 0U || config->max_samples == 0U)
+    {
+        return UP_LOLA_STATUS_INVALID_ARGUMENT;
+    }
+    *out_subscriber = nullptr;
+
+    auto instance_specifier = to_string(config->instance_specifier);
+    auto event_name = to_string(config->event_name);
+    auto mw_com_config_path = to_string(config->mw_com_config_path);
+    if (!instance_specifier.has_value() || !event_name.has_value() || !mw_com_config_path.has_value() ||
+        instance_specifier->empty() || event_name->empty())
+    {
+        return UP_LOLA_STATUS_INVALID_ARGUMENT;
+    }
+
+    const auto runtime_status = initialize_runtime_once(*mw_com_config_path);
+    if (runtime_status != UP_LOLA_STATUS_OK)
+    {
+        return runtime_status;
+    }
+
+    auto subscriber = std::make_unique<UpLolaSubscriber>();
+    subscriber->instance_specifier = std::move(*instance_specifier);
+    subscriber->event_name = std::move(*event_name);
+    subscriber->sample_size = config->sample_size;
+    subscriber->max_samples = config->max_samples;
+
+    {
+        std::lock_guard<std::mutex> lock{subscriber->mutex};
+        const auto proxy_status = subscriber->ensure_proxy_locked();
+        if (proxy_status != UP_LOLA_STATUS_OK)
+        {
+            return proxy_status;
+        }
+    }
+
+    *out_subscriber = subscriber.release();
+    return UP_LOLA_STATUS_OK;
+}
+
+void up_lola_subscriber_destroy(UpLolaSubscriber* subscriber)
+{
+    if (subscriber == nullptr)
+    {
+        return;
+    }
+    if (subscriber->proxy_event != nullptr && subscriber->subscribed)
+    {
+        subscriber->proxy_event->Unsubscribe();
+    }
+    delete subscriber;
+}
+
+UpLolaStatusCode up_lola_subscriber_receive(UpLolaSubscriber* subscriber, UpLolaRxSample** out_sample)
+{
+    if (subscriber == nullptr || out_sample == nullptr)
+    {
+        return UP_LOLA_STATUS_INVALID_ARGUMENT;
+    }
+    *out_sample = nullptr;
+    std::lock_guard<std::mutex> lock{subscriber->mutex};
+
+    const auto proxy_status = subscriber->ensure_proxy_locked();
+    if (proxy_status != UP_LOLA_STATUS_OK)
+    {
+        return proxy_status;
+    }
+
+    SamplePtr<void> received_sample;
+    auto get_result = subscriber->proxy_event->GetNewSamples(
+        [&received_sample](SamplePtr<void> sample) noexcept {
+            if (!received_sample)
+            {
+                received_sample = std::move(sample);
+            }
+        },
+        1U);
+    if (!get_result.has_value())
+    {
+        return UP_LOLA_STATUS_INTERNAL;
+    }
+    if (*get_result == 0U || !received_sample)
+    {
+        return UP_LOLA_STATUS_NOT_FOUND;
+    }
+
+    auto sample = std::make_unique<UpLolaRxSample>();
+    sample->sample = std::move(received_sample);
+    sample->sample_size = subscriber->sample_size;
     *out_sample = sample.release();
     return UP_LOLA_STATUS_OK;
 }

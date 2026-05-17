@@ -77,6 +77,11 @@ pub struct UpLolaTransport {
 }
 
 #[repr(C)]
+pub struct UpLolaSubscriber {
+    _private: [u8; 0],
+}
+
+#[repr(C)]
 pub struct UpLolaTxLoan {
     _private: [u8; 0],
 }
@@ -106,10 +111,16 @@ extern "C" {
         loan: *mut UpLolaTxLoan,
     ) -> UpLolaStatusCode;
 
-    fn up_lola_transport_receive(
-        transport: *mut UpLolaTransport,
+    fn up_lola_subscriber_create(
+        config: *const UpLolaConfig,
+        out_subscriber: *mut *mut UpLolaSubscriber,
+    ) -> UpLolaStatusCode;
+    fn up_lola_subscriber_destroy(subscriber: *mut UpLolaSubscriber);
+    fn up_lola_subscriber_receive(
+        subscriber: *mut UpLolaSubscriber,
         out_sample: *mut *mut UpLolaRxSample,
     ) -> UpLolaStatusCode;
+
     fn up_lola_rx_sample_data(sample: *const UpLolaRxSample) -> *const u8;
     fn up_lola_rx_sample_size(sample: *const UpLolaRxSample) -> usize;
     fn up_lola_rx_sample_destroy(sample: *mut UpLolaRxSample);
@@ -146,18 +157,44 @@ impl NativeTransport {
         let status = unsafe { up_lola_transport_send(self.ptr.as_ptr(), raw.as_ptr()) };
         map_status(status, "send LoLa sample")
     }
-
-    pub(crate) fn receive(&self) -> Result<NativeRxSample, UStatus> {
-        let mut out = std::ptr::null_mut();
-        let status = unsafe { up_lola_transport_receive(self.ptr.as_ptr(), &mut out) };
-        map_status(status, "receive LoLa sample")?;
-        NativeRxSample::new(out)
-    }
 }
 
 impl Drop for NativeTransport {
     fn drop(&mut self) {
         unsafe { up_lola_transport_destroy(self.ptr.as_ptr()) }
+    }
+}
+
+pub(crate) struct NativeSubscriber {
+    ptr: NonNull<UpLolaSubscriber>,
+}
+
+unsafe impl Send for NativeSubscriber {}
+unsafe impl Sync for NativeSubscriber {}
+
+impl NativeSubscriber {
+    pub(crate) fn new(config: &LolaTransportConfig) -> Result<Self, UStatus> {
+        let ffi_config = UpLolaConfig::new(config);
+        let mut out = std::ptr::null_mut();
+        let status = unsafe { up_lola_subscriber_create(&ffi_config, &mut out) };
+        map_status(status, "create LoLa subscriber")?;
+        let ptr = NonNull::new(out).ok_or_else(|| {
+            UStatus::fail_with_code(UCode::INTERNAL, "LoLa bridge returned null subscriber")
+        })?;
+        Ok(Self { ptr })
+    }
+
+    pub(crate) fn receive(&self) -> Result<NativeRxSample, UStatus> {
+        let mut out = std::ptr::null_mut();
+        let status = unsafe { up_lola_subscriber_receive(self.ptr.as_ptr(), &mut out) };
+        map_status(status, "receive LoLa sample")?;
+        NativeRxSample::new(out)
+    }
+}
+
+impl Drop for NativeSubscriber {
+    fn drop(&mut self) {
+        unsafe { up_lola_subscriber_destroy(self.ptr.as_ptr()) }
     }
 }
 

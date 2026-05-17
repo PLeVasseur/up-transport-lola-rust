@@ -20,7 +20,7 @@ use up_rust::{
 };
 
 #[cfg(feature = "lola-ffi")]
-use crate::sys::NativeTransport;
+use crate::sys::{NativeSubscriber, NativeTransport};
 use crate::{
     config::LolaTransportConfig,
     frame::{LolaRxLease, LolaTxLoan},
@@ -32,9 +32,11 @@ pub struct UTransportLola {
     listeners: Mutex<Vec<ListenerRegistration>>,
     listener_task: Mutex<Option<JoinHandle<()>>>,
     #[cfg(feature = "test-stub")]
-    pending: Mutex<VecDeque<LolaRxLease>>,
+    pending: Mutex<VecDeque<Vec<u8>>>,
     #[cfg(feature = "lola-ffi")]
     native: NativeTransport,
+    #[cfg(feature = "lola-ffi")]
+    subscriber: Mutex<Option<NativeSubscriber>>,
 }
 
 impl UTransportLola {
@@ -51,6 +53,8 @@ impl UTransportLola {
             pending: Mutex::new(VecDeque::new()),
             #[cfg(feature = "lola-ffi")]
             native,
+            #[cfg(feature = "lola-ffi")]
+            subscriber: Mutex::new(None),
         }))
     }
 
@@ -58,22 +62,17 @@ impl UTransportLola {
         &self.config
     }
 
+    #[cfg(feature = "lola-ffi")]
     async fn receive_next_zero_copy(&self) -> Result<LolaRxLease, UStatus> {
-        #[cfg(feature = "test-stub")]
-        {
-            self.pending.lock().await.pop_front().ok_or_else(|| {
-                UStatus::fail_with_code(UCode::NOT_FOUND, "no LoLa sample available")
-            })
+        let mut subscriber = self.subscriber.lock().await;
+        if subscriber.is_none() {
+            *subscriber = Some(NativeSubscriber::new(&self.config)?);
         }
-        #[cfg(feature = "lola-ffi")]
-        loop {
-            let sample = self.native.receive()?;
-            match LolaRxLease::from_native(sample) {
-                Ok(frame) => return Ok(frame),
-                Err(status) if status.get_code() == UCode::INVALID_ARGUMENT => continue,
-                Err(status) => return Err(status),
-            }
-        }
+        let sample = subscriber
+            .as_ref()
+            .expect("LoLa subscriber should be initialized")
+            .receive()?;
+        LolaRxLease::from_native(sample)
     }
 
     async fn ensure_listener_task(&self) -> Result<(), UStatus> {
@@ -82,50 +81,89 @@ impl UTransportLola {
             return Ok(());
         }
 
-        let transport = self.self_ref.upgrade().ok_or_else(|| {
-            UStatus::fail_with_code(
-                UCode::FAILED_PRECONDITION,
-                "LoLa transport is shutting down",
-            )
-        })?;
+        let transport = self.self_ref.clone();
         let handle = tokio::runtime::Handle::try_current().map_err(|error| {
             UStatus::fail_with_code(
                 UCode::FAILED_PRECONDITION,
                 format!("LoLa listener registration requires a Tokio runtime: {error}"),
             )
         })?;
-        *task = Some(handle.spawn(async move { transport.listener_loop().await }));
+        *task = Some(handle.spawn(async move { Self::listener_loop(transport).await }));
         Ok(())
     }
 
-    async fn listener_loop(self: Arc<Self>) {
+    async fn listener_loop(self_ref: Weak<Self>) {
         loop {
-            if self.listeners.lock().await.is_empty() {
+            let Some(transport) = self_ref.upgrade() else {
+                break;
+            };
+
+            if transport.listeners.lock().await.is_empty() {
                 break;
             }
 
-            match self.receive_next_zero_copy().await {
-                Ok(frame) => self.dispatch_zero_copy(frame).await,
-                Err(status) if status.get_code() == UCode::NOT_FOUND => {
+            let poll_result = transport.poll_listener_frames().await;
+            drop(transport);
+
+            match poll_result {
+                Ok(deliveries) if deliveries.is_empty() => {
                     tokio::time::sleep(Duration::from_millis(10)).await;
                 }
-                Err(_) => {
+                Ok(deliveries) => {
+                    for (listener, frame) in deliveries {
+                        listener.on_receive_zero_copy(frame).await;
+                    }
+                }
+                Err(status) => {
+                    if status.get_code() == UCode::INVALID_ARGUMENT {
+                        eprintln!("discarding invalid LoLa native listener sample: {status:?}");
+                    }
                     tokio::time::sleep(Duration::from_millis(100)).await;
                 }
             }
         }
     }
 
-    async fn dispatch_zero_copy(&self, frame: LolaRxLease) {
-        let listener = {
+    async fn poll_listener_frames(
+        &self,
+    ) -> Result<Vec<(Arc<dyn UZeroCopyListener<LolaRxLease>>, LolaRxLease)>, UStatus> {
+        #[cfg(feature = "test-stub")]
+        {
+            let Some(sample) = self.pending.lock().await.pop_front() else {
+                return Ok(Vec::new());
+            };
+            let probe = LolaRxLease::from_vec(sample.clone())?;
+            let listeners = {
+                let listeners = self.listeners.lock().await;
+                listeners
+                    .iter()
+                    .filter(|registration| registration.matches_frame(&probe))
+                    .map(|registration| Arc::clone(&registration.listener))
+                    .collect::<Vec<_>>()
+            };
+            let mut deliveries = Vec::with_capacity(listeners.len());
+            for listener in listeners {
+                deliveries.push((listener, LolaRxLease::from_vec(sample.clone())?));
+            }
+            Ok(deliveries)
+        }
+        #[cfg(feature = "lola-ffi")]
+        {
+            let mut deliveries = Vec::new();
             let listeners = self.listeners.lock().await;
-            listeners
-                .iter()
-                .find(|registration| registration.matches_frame(&frame))
-                .map(|registration| Arc::clone(&registration.listener))
-        };
-        if let Some(listener) = listener {
-            listener.on_receive_zero_copy(frame).await;
+            for registration in listeners.iter() {
+                match registration.subscriber.receive() {
+                    Ok(sample) => {
+                        let frame = LolaRxLease::from_native(sample)?;
+                        if registration.matches_frame(&frame) {
+                            deliveries.push((Arc::clone(&registration.listener), frame));
+                        }
+                    }
+                    Err(status) if status.get_code() == UCode::NOT_FOUND => {}
+                    Err(status) => return Err(status),
+                }
+            }
+            Ok(deliveries)
         }
     }
 }
@@ -134,6 +172,8 @@ struct ListenerRegistration {
     source_filter: UUri,
     sink_filter: Option<UUri>,
     listener: Arc<dyn UZeroCopyListener<LolaRxLease>>,
+    #[cfg(feature = "lola-ffi")]
+    subscriber: NativeSubscriber,
 }
 
 impl ListenerRegistration {
@@ -141,12 +181,17 @@ impl ListenerRegistration {
         source_filter: &UUri,
         sink_filter: Option<&UUri>,
         listener: Arc<dyn UZeroCopyListener<LolaRxLease>>,
-    ) -> Self {
-        Self {
+        _config: &LolaTransportConfig,
+    ) -> Result<Self, UStatus> {
+        #[cfg(feature = "lola-ffi")]
+        let subscriber = NativeSubscriber::new(_config)?;
+        Ok(Self {
             source_filter: source_filter.to_owned(),
             sink_filter: sink_filter.map(ToOwned::to_owned),
             listener,
-        }
+            #[cfg(feature = "lola-ffi")]
+            subscriber,
+        })
     }
 
     fn matches_frame(&self, frame: &LolaRxLease) -> bool {
@@ -209,8 +254,7 @@ impl UZeroCopyTransport for UTransportLola {
         #[cfg(feature = "test-stub")]
         {
             let sample = buffer.into_vec()?;
-            let lease = LolaRxLease::from_vec(sample)?;
-            self.pending.lock().await.push_back(lease);
+            self.pending.lock().await.push_back(sample);
             Ok(())
         }
         #[cfg(feature = "lola-ffi")]
@@ -230,8 +274,9 @@ impl UZeroCopyTransport for UTransportLola {
         {
             let mut pending = self.pending.lock().await;
             while let Some(sample) = pending.pop_front() {
-                if frame_matches(&sample, source_filter, sink_filter) {
-                    return Ok(sample);
+                let frame = LolaRxLease::from_vec(sample)?;
+                if frame_matches(&frame, source_filter, sink_filter) {
+                    return Ok(frame);
                 }
             }
             Err(UStatus::fail_with_code(
@@ -255,22 +300,18 @@ impl UZeroCopyTransport for UTransportLola {
         listener: Arc<dyn UZeroCopyListener<Self::Rx>>,
     ) -> Result<(), UStatus> {
         verify_filter_criteria(source_filter, sink_filter)?;
-        let registration = ListenerRegistration::new(source_filter, sink_filter, listener);
         {
             let mut listeners = self.listeners.lock().await;
-            if listeners.iter().any(|existing| {
-                filters_overlap(
-                    &existing.source_filter,
-                    existing.sink_filter.as_ref(),
-                    source_filter,
-                    sink_filter,
-                )
+            if listeners.iter().any(|registration| {
+                registration.has_same_identity(source_filter, sink_filter, &listener)
             }) {
                 return Err(UStatus::fail_with_code(
                     UCode::ALREADY_EXISTS,
-                    "LoLa listener filters overlap an existing registration",
+                    "LoLa listener already registered for filters",
                 ));
             }
+            let registration =
+                ListenerRegistration::new(source_filter, sink_filter, listener, &self.config)?;
             listeners.push(registration);
         }
         self.ensure_listener_task().await
@@ -324,64 +365,6 @@ fn frame_matches(frame: &LolaRxLease, source_filter: &UUri, sink_filter: Option<
                 .sink()
                 .is_some_and(|sink| filter.matches(sink))
         })
-}
-
-fn filters_overlap(
-    left_source: &UUri,
-    left_sink: Option<&UUri>,
-    right_source: &UUri,
-    right_sink: Option<&UUri>,
-) -> bool {
-    uri_patterns_overlap(left_source, right_source) && sink_filters_overlap(left_sink, right_sink)
-}
-
-fn sink_filters_overlap(left: Option<&UUri>, right: Option<&UUri>) -> bool {
-    left.is_none() || right.is_none() || uri_patterns_overlap(left.unwrap(), right.unwrap())
-}
-
-fn uri_patterns_overlap(left: &UUri, right: &UUri) -> bool {
-    string_field_overlaps(
-        left.has_wildcard_authority(),
-        left.authority_name(),
-        right.has_wildcard_authority(),
-        right.authority_name(),
-    ) && integer_field_overlaps(
-        left.has_wildcard_entity_instance(),
-        left.uentity_instance_id(),
-        right.has_wildcard_entity_instance(),
-        right.uentity_instance_id(),
-    ) && integer_field_overlaps(
-        left.has_wildcard_entity_type(),
-        left.uentity_type_id(),
-        right.has_wildcard_entity_type(),
-        right.uentity_type_id(),
-    ) && integer_field_overlaps(
-        left.has_wildcard_version(),
-        left.uentity_major_version(),
-        right.has_wildcard_version(),
-        right.uentity_major_version(),
-    ) && integer_field_overlaps(
-        left.has_wildcard_resource_id(),
-        left.resource_id(),
-        right.has_wildcard_resource_id(),
-        right.resource_id(),
-    )
-}
-
-fn string_field_overlaps(
-    left_wildcard: bool,
-    left: String,
-    right_wildcard: bool,
-    right: String,
-) -> bool {
-    left_wildcard || right_wildcard || left == right
-}
-
-fn integer_field_overlaps<T>(left_wildcard: bool, left: T, right_wildcard: bool, right: T) -> bool
-where
-    T: Eq,
-{
-    left_wildcard || right_wildcard || left == right
 }
 
 #[cfg(all(test, feature = "test-stub", not(feature = "lola-ffi")))]
@@ -493,38 +476,84 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn listener_registration_rejects_overlapping_filters() {
+    async fn overlapping_stub_listeners_both_receive_matching_payload() {
         let transport = UTransportLola::build(config()).unwrap();
         let topic = UUri::try_from_parts("vehicle", 0x4210, 1, 0x9000).unwrap();
         let broad_topic = UUri::any_with_resource_id(topic.resource_id_raw());
-        let (sender_a, _receiver_a) = mpsc::unbounded_channel();
-        let (sender_b, _receiver_b) = mpsc::unbounded_channel();
+        let frame = UFrameBuilder::publish(topic.clone())
+            .build_with_raw_payload(b"payload".as_slice())
+            .unwrap();
+        let (sender_a, mut receiver_a) = mpsc::unbounded_channel();
+        let (sender_b, mut receiver_b) = mpsc::unbounded_channel();
         let listener_a: Arc<dyn UZeroCopyListener<LolaRxLease>> =
             Arc::new(ListenerSender(sender_a));
         let listener_b: Arc<dyn UZeroCopyListener<LolaRxLease>> =
             Arc::new(ListenerSender(sender_b));
 
         transport
-            .register_zero_copy_listener(&topic, None, listener_a)
+            .register_zero_copy_listener(&topic, None, Arc::clone(&listener_a))
             .await
             .unwrap();
-        let status = transport
-            .register_zero_copy_listener(&broad_topic, None, listener_b)
+        transport
+            .register_zero_copy_listener(&broad_topic, None, Arc::clone(&listener_b))
             .await
-            .unwrap_err();
+            .unwrap();
 
-        assert_eq!(status.get_code(), UCode::ALREADY_EXISTS);
+        let mut loan = transport
+            .reserve(frame.metadata().clone(), frame.payload_bytes().len(), 1)
+            .await
+            .unwrap();
+        loan.payload_mut().copy_from_slice(frame.payload_bytes());
+        transport.send_zero_copy(loan).await.unwrap();
+
+        let (_, payload_a) = tokio::time::timeout(Duration::from_secs(1), receiver_a.recv())
+            .await
+            .expect("first listener should receive before timeout")
+            .expect("first listener should send a result");
+        let (_, payload_b) = tokio::time::timeout(Duration::from_secs(1), receiver_b.recv())
+            .await
+            .expect("second listener should receive before timeout")
+            .expect("second listener should send a result");
+
+        assert_eq!(payload_a, frame.payload_bytes());
+        assert_eq!(payload_b, frame.payload_bytes());
+
+        transport
+            .unregister_zero_copy_listener(&topic, None, listener_a)
+            .await
+            .unwrap();
+        transport
+            .unregister_zero_copy_listener(&broad_topic, None, listener_b)
+            .await
+            .unwrap();
     }
 }
 
 #[cfg(all(test, feature = "native-smoke"))]
 mod native_tests {
+    use std::sync::OnceLock;
+
+    use async_trait::async_trait;
+    use tokio::sync::mpsc;
     use up_rust::{
-        zero_copy::{UContiguousZeroCopyRxFrame, UTxBuffer, UZeroCopyTransport},
+        zero_copy::{UContiguousZeroCopyRxFrame, UTxBuffer, UZeroCopyListener, UZeroCopyTransport},
         UFrameBuilder, UUri,
     };
 
     use super::*;
+
+    static NATIVE_SMOKE_LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
+
+    struct NativeListenerSender(mpsc::UnboundedSender<Vec<u8>>);
+
+    #[async_trait]
+    impl UZeroCopyListener<LolaRxLease> for NativeListenerSender {
+        async fn on_receive_zero_copy(&self, frame: LolaRxLease) {
+            self.0
+                .send(frame.contiguous_payload().to_vec())
+                .expect("listener result receiver should be open");
+        }
+    }
 
     fn native_smoke_config() -> LolaTransportConfig {
         let fixture_config_path = concat!(
@@ -558,12 +587,16 @@ mod native_tests {
         }
     }
 
+    async fn native_smoke_guard() -> tokio::sync::MutexGuard<'static, ()> {
+        NATIVE_SMOKE_LOCK
+            .get_or_init(|| tokio::sync::Mutex::new(()))
+            .lock()
+            .await
+    }
+
     #[tokio::test]
     async fn native_reserve_send_receive_round_trips_payload() {
-        if std::env::var_os("LOLA_NATIVE_SMOKE_RUN").is_none() {
-            eprintln!("skipping LoLa native smoke; set LOLA_NATIVE_SMOKE_RUN=1 to execute it");
-            return;
-        }
+        let _guard = native_smoke_guard().await;
         let config = native_smoke_config();
         let authority = config.local_authority.clone();
         let transport = UTransportLola::build(config).unwrap();
@@ -572,7 +605,11 @@ mod native_tests {
             .build_with_raw_payload(b"payload".as_slice())
             .unwrap();
         for _ in 0..100 {
-            let _ = transport.receive_zero_copy(&topic, None).await;
+            if let Err(status) = transport.receive_zero_copy(&topic, None).await {
+                if status.get_code() == UCode::INVALID_ARGUMENT {
+                    eprintln!("discarding invalid pre-existing LoLa native sample: {status:?}");
+                }
+            }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
         let mut loan = transport
@@ -592,6 +629,10 @@ mod native_tests {
                 Err(status) if status.get_code() == UCode::NOT_FOUND => {
                     tokio::time::sleep(Duration::from_millis(10)).await;
                 }
+                Err(status) if status.get_code() == UCode::INVALID_ARGUMENT => {
+                    eprintln!("discarding invalid LoLa native sample while waiting for test frame: {status:?}");
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
                 Err(status) => panic!("unexpected LoLa receive error: {status:?}"),
             }
         }
@@ -599,5 +640,60 @@ mod native_tests {
 
         assert_eq!(received.metadata(), frame.metadata());
         assert_eq!(received.contiguous_payload(), frame.payload_bytes());
+    }
+
+    #[tokio::test]
+    async fn native_two_listeners_receive_same_payload() {
+        let _guard = native_smoke_guard().await;
+        let config = native_smoke_config();
+        let authority = config.local_authority.clone();
+        let transport = UTransportLola::build(config).unwrap();
+        let topic = UUri::try_from_parts(&authority, 0x4210, 1, 0x9001).unwrap();
+        let frame = UFrameBuilder::publish(topic.clone())
+            .build_with_raw_payload(b"fanout".as_slice())
+            .unwrap();
+        let (sender_a, mut receiver_a) = mpsc::unbounded_channel();
+        let (sender_b, mut receiver_b) = mpsc::unbounded_channel();
+        let listener_a: Arc<dyn UZeroCopyListener<LolaRxLease>> =
+            Arc::new(NativeListenerSender(sender_a));
+        let listener_b: Arc<dyn UZeroCopyListener<LolaRxLease>> =
+            Arc::new(NativeListenerSender(sender_b));
+
+        transport
+            .register_zero_copy_listener(&topic, None, Arc::clone(&listener_a))
+            .await
+            .unwrap();
+        transport
+            .register_zero_copy_listener(&topic, None, Arc::clone(&listener_b))
+            .await
+            .unwrap();
+
+        let mut loan = transport
+            .reserve(frame.metadata().clone(), frame.payload_bytes().len(), 1)
+            .await
+            .unwrap();
+        loan.payload_mut().copy_from_slice(frame.payload_bytes());
+        transport.send_zero_copy(loan).await.unwrap();
+
+        let payload_a = tokio::time::timeout(Duration::from_secs(5), receiver_a.recv())
+            .await
+            .expect("first listener should receive before timeout")
+            .expect("first listener should send a result");
+        let payload_b = tokio::time::timeout(Duration::from_secs(5), receiver_b.recv())
+            .await
+            .expect("second listener should receive before timeout")
+            .expect("second listener should send a result");
+
+        assert_eq!(payload_a, frame.payload_bytes());
+        assert_eq!(payload_b, frame.payload_bytes());
+
+        transport
+            .unregister_zero_copy_listener(&topic, None, listener_a)
+            .await
+            .unwrap();
+        transport
+            .unregister_zero_copy_listener(&topic, None, listener_b)
+            .await
+            .unwrap();
     }
 }

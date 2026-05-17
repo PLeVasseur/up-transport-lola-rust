@@ -12,6 +12,7 @@
 extern "C" {
 
 struct UpLolaTransport;
+struct UpLolaSubscriber;
 struct UpLolaTxLoan;
 struct UpLolaRxSample;
 
@@ -51,6 +52,11 @@ void up_lola_tx_loan_destroy(UpLolaTxLoan* loan);
 UpLolaStatusCode up_lola_transport_send(UpLolaTransport* transport, UpLolaTxLoan* loan);
 
 UpLolaStatusCode up_lola_transport_receive(UpLolaTransport* transport, UpLolaRxSample** out_sample);
+
+UpLolaStatusCode up_lola_subscriber_create(const UpLolaConfig* config, UpLolaSubscriber** out_subscriber);
+void up_lola_subscriber_destroy(UpLolaSubscriber* subscriber);
+UpLolaStatusCode up_lola_subscriber_receive(UpLolaSubscriber* subscriber, UpLolaRxSample** out_sample);
+
 const std::uint8_t* up_lola_rx_sample_data(const UpLolaRxSample* sample);
 std::size_t up_lola_rx_sample_size(const UpLolaRxSample* sample);
 void up_lola_rx_sample_destroy(UpLolaRxSample* sample);

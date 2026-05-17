@@ -77,6 +77,10 @@ The production bridge uses LoLa generic APIs:
 
 This avoids generated type bindings and maps uProtocol frame bytes into fixed-size LoLa event samples.
 
+The bridge exposes the LoLa event slot's raw sample storage to Rust. S-CORE's current generic skeleton allocation path returns an owning loan whose pointer can reference the generic `EventDataStorage` object base, while the generic proxy receives bytes from the raw event slot array. The bridge keeps the original loan for `Send` ownership but writes frame bytes through `EventDataStorage::data()` so TX and RX use the same sample storage.
+
+The bridge separates provider and subscriber ownership. `NativeTransport` owns the `GenericSkeleton`/`GenericSkeletonEvent` path used for `Allocate` and `Send`; each direct receive path or registered listener owns a separate `GenericProxy`/`GenericProxyEvent` subscription. This mirrors the S-CORE Rust binding model and lets a local listener and a streamer listener receive the same LoLa event through independent subscription queues.
+
 ## Tests
 
 Build and link the native bridge:
@@ -91,19 +95,19 @@ Run the fake unit-test backend:
 cargo test --no-default-features --features test-stub
 ```
 
-The native end-to-end smoke test is compiled only with `native-smoke`. It uses `tests/fixtures/mw_com_config.json` by default. The test is skipped unless `LOLA_NATIVE_SMOKE_RUN=1` is set because LoLa shared-memory runtime setup and loopback behavior are host-dependent:
+The native end-to-end smoke test is compiled and run only with `native-smoke`. It uses `tests/fixtures/mw_com_config.json` by default:
 
 ```sh
-LOLA_NATIVE_SMOKE_RUN=1 \
 BAZEL=/path/to/bazelisk \
 cargo test --features native-smoke
 ```
+
+With the checked-in fixture, the native smoke covers direct reserve/send/receive loopback and two independent listener subscriptions receiving the same LoLa event. Invalid frame magic diagnostics still include the first four sample bytes to make stale, foreign, or incorrectly mapped shared-memory samples actionable.
 
 Override the checked-in fixture when needed:
 
 ```sh
 LOLA_NATIVE_SMOKE_CONFIG=/path/to/mw_com_config.json \
-LOLA_NATIVE_SMOKE_RUN=1 \
 BAZEL=/path/to/bazelisk \
 cargo test --features native-smoke
 ```
