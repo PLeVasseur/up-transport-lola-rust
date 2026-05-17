@@ -1,0 +1,3 @@
+[submodule "third_party/eclipse-score-communication"]
+	path = third_party/eclipse-score-communication
+	url = https://github.com/eclipse-score/communication.git

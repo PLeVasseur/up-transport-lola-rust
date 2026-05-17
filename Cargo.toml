@@ -1,0 +1,25 @@
+[package]
+name = "up-transport-lola-rust"
+version = "0.1.0"
+edition = "2021"
+description = "Eclipse S-CORE LoLa zero-copy transport for Eclipse uProtocol"
+keywords = ["uProtocol", "LoLa", "S-CORE", "zero-copy", "shared-memory"]
+license = "Apache-2.0"
+build = "build.rs"
+
+[features]
+default = ["bundled"]
+bundled = ["lola-build-from-source"]
+lola-ffi = []
+lola-build-from-source = ["lola-ffi"]
+test-stub = []
+
+[dependencies]
+async-trait = "0.1"
+tokio = { version = "1.45.1", default-features = false, features = ["sync"] }
+up-rust = { path = "/home/pete.levasseur/eclipse/uprotocol/up-rust" }
+
+[build-dependencies]
+
+[dev-dependencies]
+tokio = { version = "1.45.1", default-features = false, features = ["macros", "rt"] }
