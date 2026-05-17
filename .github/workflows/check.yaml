@@ -1,0 +1,99 @@
+name: Check
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    paths:
+      - ".github/**"
+      - "Cargo.*"
+      - "build.rs"
+      - "cpp/**"
+      - "src/**"
+      - "tests/**"
+      - "third_party/**"
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.ref }}-${{ github.workflow }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -Dwarnings
+
+jobs:
+  fmt:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - name: Check formatting
+        run: cargo fmt --check
+
+  test:
+    runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: stub
+            features: --no-default-features --features test-stub
+            needs_bazel: false
+          - name: bundled-native
+            features: ""
+            needs_bazel: true
+          - name: native-smoke
+            features: --features native-smoke
+            needs_bazel: true
+    name: ${{ matrix.name }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Install native build dependencies
+        if: matrix.needs_bazel
+        run: sudo apt-get update && sudo apt-get install -y build-essential curl git
+
+      - name: Install Bazelisk
+        if: matrix.needs_bazel
+        run: |
+          curl -fsSL -o /tmp/bazelisk https://github.com/bazelbuild/bazelisk/releases/download/v1.27.0/bazelisk-linux-amd64
+          chmod +x /tmp/bazelisk
+          echo "BAZEL=/tmp/bazelisk" >> "$GITHUB_ENV"
+
+      - name: Check
+        run: cargo check --all-targets ${{ matrix.features }}
+
+      - name: Test
+        run: cargo test --all-targets ${{ matrix.features }}
+
+      - name: Clippy
+        run: cargo clippy --all-targets ${{ matrix.features }} -- -D warnings
+
+  docs:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install native build dependencies
+        run: sudo apt-get update && sudo apt-get install -y build-essential curl git
+      - name: Install Bazelisk
+        run: |
+          curl -fsSL -o /tmp/bazelisk https://github.com/bazelbuild/bazelisk/releases/download/v1.27.0/bazelisk-linux-amd64
+          chmod +x /tmp/bazelisk
+          echo "BAZEL=/tmp/bazelisk" >> "$GITHUB_ENV"
+      - name: Build docs
+        run: RUSTDOCFLAGS=-Dwarnings cargo doc --no-deps

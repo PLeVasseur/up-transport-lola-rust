@@ -374,8 +374,12 @@ mod tests {
     use async_trait::async_trait;
     use tokio::sync::mpsc;
     use up_rust::{
-        zero_copy::{UContiguousZeroCopyRxFrame, UTxBuffer, UZeroCopyListener, UZeroCopyTransport},
-        UCode, UFrameBuilder, UFrameMetadata, UUri,
+        wire::{RawBytes, WireFormat},
+        zero_copy::{
+            UContiguousZeroCopyRxFrame, UTxBuffer, UZeroCopyListener, UZeroCopyTransport,
+            UZeroCopyTransportExt,
+        },
+        UAttributes, UCode, UFrameBuilder, UFrameMetadata, UMessageType, UUri, UUID,
     };
 
     use super::*;
@@ -527,6 +531,68 @@ mod tests {
             .await
             .unwrap();
     }
+
+    #[tokio::test]
+    async fn targeted_stub_listeners_both_receive_exact_and_sink_wildcard_payload() {
+        let transport = UTransportLola::build(config()).unwrap();
+        let source = UUri::try_from_parts("vehicle", 0x4210, 1, 0x9002).unwrap();
+        let sink = UUri::try_from_parts("vehicle", 0x4220, 1, 0).unwrap();
+        let sink_wildcard = UUri::try_from_parts("vehicle", 0xFFFF_FFFF, 0xFF, 0).unwrap();
+        let (sender_a, mut receiver_a) = mpsc::unbounded_channel();
+        let (sender_b, mut receiver_b) = mpsc::unbounded_channel();
+        let listener_a: Arc<dyn UZeroCopyListener<LolaRxLease>> =
+            Arc::new(ListenerSender(sender_a));
+        let listener_b: Arc<dyn UZeroCopyListener<LolaRxLease>> =
+            Arc::new(ListenerSender(sender_b));
+
+        transport
+            .register_zero_copy_listener(&source, Some(&sink), Arc::clone(&listener_a))
+            .await
+            .unwrap();
+        transport
+            .register_zero_copy_listener(&source, Some(&sink_wildcard), Arc::clone(&listener_b))
+            .await
+            .unwrap();
+
+        let attributes = UAttributes::new(
+            UUID::build(),
+            source.clone(),
+            Some(sink.clone()),
+            UMessageType::Notification,
+        );
+        transport
+            .send_serialized_zero_copy::<RawBytes, _>(
+                UFrameMetadata::new(attributes, RawBytes::encoding()),
+                &&b"targeted"[..],
+            )
+            .await
+            .unwrap();
+
+        let (metadata_a, payload_a) =
+            tokio::time::timeout(Duration::from_secs(1), receiver_a.recv())
+                .await
+                .expect("first listener should receive before timeout")
+                .expect("first listener should send a result");
+        let (metadata_b, payload_b) =
+            tokio::time::timeout(Duration::from_secs(1), receiver_b.recv())
+                .await
+                .expect("second listener should receive before timeout")
+                .expect("second listener should send a result");
+
+        assert_eq!(metadata_a.attributes().sink(), Some(&sink));
+        assert_eq!(metadata_b.attributes().sink(), Some(&sink));
+        assert_eq!(payload_a, b"targeted");
+        assert_eq!(payload_b, b"targeted");
+
+        transport
+            .unregister_zero_copy_listener(&source, Some(&sink), listener_a)
+            .await
+            .unwrap();
+        transport
+            .unregister_zero_copy_listener(&source, Some(&sink_wildcard), listener_b)
+            .await
+            .unwrap();
+    }
 }
 
 #[cfg(all(test, feature = "native-smoke"))]
@@ -536,8 +602,12 @@ mod native_tests {
     use async_trait::async_trait;
     use tokio::sync::mpsc;
     use up_rust::{
-        zero_copy::{UContiguousZeroCopyRxFrame, UTxBuffer, UZeroCopyListener, UZeroCopyTransport},
-        UFrameBuilder, UUri,
+        wire::{RawBytes, WireFormat},
+        zero_copy::{
+            UContiguousZeroCopyRxFrame, UTxBuffer, UZeroCopyListener, UZeroCopyTransport,
+            UZeroCopyTransportExt,
+        },
+        UAttributes, UFrameBuilder, UFrameMetadata, UMessageType, UUri, UUID,
     };
 
     use super::*;
@@ -693,6 +763,121 @@ mod native_tests {
             .unwrap();
         transport
             .unregister_zero_copy_listener(&topic, None, listener_b)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn native_exact_and_source_wildcard_listeners_receive_same_payload() {
+        let _guard = native_smoke_guard().await;
+        let config = native_smoke_config();
+        let authority = config.local_authority.clone();
+        let transport = UTransportLola::build(config).unwrap();
+        let topic = UUri::try_from_parts(&authority, 0x4210, 1, 0x9002).unwrap();
+        let source_wildcard = UUri::any_with_resource_id(topic.resource_id_raw());
+        let (sender_a, mut receiver_a) = mpsc::unbounded_channel();
+        let (sender_b, mut receiver_b) = mpsc::unbounded_channel();
+        let listener_a: Arc<dyn UZeroCopyListener<LolaRxLease>> =
+            Arc::new(NativeListenerSender(sender_a));
+        let listener_b: Arc<dyn UZeroCopyListener<LolaRxLease>> =
+            Arc::new(NativeListenerSender(sender_b));
+
+        transport
+            .register_zero_copy_listener(&topic, None, Arc::clone(&listener_a))
+            .await
+            .unwrap();
+        transport
+            .register_zero_copy_listener(&source_wildcard, None, Arc::clone(&listener_b))
+            .await
+            .unwrap();
+
+        transport
+            .send_serialized_zero_copy::<RawBytes, _>(
+                UFrameMetadata::publish(topic.clone()),
+                &&b"source-wildcard"[..],
+            )
+            .await
+            .unwrap();
+
+        let payload_a = tokio::time::timeout(Duration::from_secs(5), receiver_a.recv())
+            .await
+            .expect("first listener should receive before timeout")
+            .expect("first listener should send a result");
+        let payload_b = tokio::time::timeout(Duration::from_secs(5), receiver_b.recv())
+            .await
+            .expect("second listener should receive before timeout")
+            .expect("second listener should send a result");
+
+        assert_eq!(payload_a, b"source-wildcard");
+        assert_eq!(payload_b, b"source-wildcard");
+
+        transport
+            .unregister_zero_copy_listener(&topic, None, listener_a)
+            .await
+            .unwrap();
+        transport
+            .unregister_zero_copy_listener(&source_wildcard, None, listener_b)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn native_exact_and_sink_wildcard_listeners_receive_same_targeted_payload() {
+        let _guard = native_smoke_guard().await;
+        let config = native_smoke_config();
+        let authority = config.local_authority.clone();
+        let transport = UTransportLola::build(config).unwrap();
+        let source = UUri::try_from_parts(&authority, 0x4210, 1, 0x9003).unwrap();
+        let sink = UUri::try_from_parts(&authority, 0x4220, 1, 0).unwrap();
+        let sink_wildcard = UUri::try_from_parts(&authority, 0xFFFF_FFFF, 0xFF, 0).unwrap();
+        let (sender_a, mut receiver_a) = mpsc::unbounded_channel();
+        let (sender_b, mut receiver_b) = mpsc::unbounded_channel();
+        let listener_a: Arc<dyn UZeroCopyListener<LolaRxLease>> =
+            Arc::new(NativeListenerSender(sender_a));
+        let listener_b: Arc<dyn UZeroCopyListener<LolaRxLease>> =
+            Arc::new(NativeListenerSender(sender_b));
+
+        transport
+            .register_zero_copy_listener(&source, Some(&sink), Arc::clone(&listener_a))
+            .await
+            .unwrap();
+        transport
+            .register_zero_copy_listener(&source, Some(&sink_wildcard), Arc::clone(&listener_b))
+            .await
+            .unwrap();
+
+        let attributes = UAttributes::new(
+            UUID::build(),
+            source.clone(),
+            Some(sink.clone()),
+            UMessageType::Notification,
+        );
+        transport
+            .send_serialized_zero_copy::<RawBytes, _>(
+                UFrameMetadata::new(attributes, RawBytes::encoding()),
+                &&b"sink-wildcard"[..],
+            )
+            .await
+            .unwrap();
+
+        let payload_a = tokio::time::timeout(Duration::from_secs(5), receiver_a.recv())
+            .await
+            .expect("first listener should receive before timeout")
+            .expect("first listener should send a result");
+        let payload_b = tokio::time::timeout(Duration::from_secs(5), receiver_b.recv())
+            .await
+            .expect("second listener should receive before timeout")
+            .expect("second listener should send a result");
+
+        assert_eq!(payload_a, b"sink-wildcard");
+        assert_eq!(payload_b, b"sink-wildcard");
+
+        transport
+            .unregister_zero_copy_listener(&source, Some(&sink), listener_a)
+            .await
+            .unwrap();
+        transport
+            .unregister_zero_copy_listener(&source, Some(&sink_wildcard), listener_b)
             .await
             .unwrap();
     }

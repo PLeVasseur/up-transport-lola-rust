@@ -327,17 +327,20 @@ fn is_executable_file(path: &Path) -> bool {
 }
 
 fn run_bazel(bazel: &Path, workspace_dir: &Path, output_base: &Path, args: &[&str]) {
-    let output = bazel_command(bazel, workspace_dir, output_base, args)
-        .output()
+    println!(
+        "cargo:warning=running Bazel for LoLa native bridge: {}",
+        args.join(" ")
+    );
+    let status = bazel_command(bazel, workspace_dir, output_base, args)
+        .status()
         .unwrap_or_else(|error| panic!("failed to execute {}: {error}", bazel.display()));
-    if !output.status.success() {
+    if !status.success() {
         panic!(
-            "Bazel command failed while building the LoLa native bridge.\n\nCommand: {}\nGenerated workspace: {}\nBazel output base: {}\nstdout:\n{}\nstderr:\n{}\nHow to resolve:\n  1. If Bazelisk/Bazel is missing, install Bazelisk and set BAZEL=/path/to/bazelisk\n  2. If dependency resolution failed, ensure network access to the S-CORE Bazel registries\n  3. If the S-CORE checkout is invalid, run: git submodule update --init --recursive {BUNDLED_COMMUNICATION_PATH}\n  4. Or provide a known-good checkout: LOLA_COMMUNICATION_ROOT=/path/to/eclipse-score-communication cargo build",
+            "Bazel command failed while building the LoLa native bridge.\n\nCommand: {}\nGenerated workspace: {}\nBazel output base: {}\nExit status: {}\nHow to resolve:\n  1. If Bazelisk/Bazel is missing, install Bazelisk and set BAZEL=/path/to/bazelisk\n  2. If dependency resolution failed, ensure network access to the S-CORE Bazel registries\n  3. If the S-CORE checkout is invalid, run: git submodule update --init --recursive {BUNDLED_COMMUNICATION_PATH}\n  4. Or provide a known-good checkout: LOLA_COMMUNICATION_ROOT=/path/to/eclipse-score-communication cargo build",
             args.join(" "),
             workspace_dir.display(),
             output_base.display(),
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
+            status
         );
     }
 }
@@ -364,12 +367,7 @@ fn run_bazel_capture(
     String::from_utf8(output.stdout).expect("Bazel output should be UTF-8")
 }
 
-fn bazel_command<'a>(
-    bazel: &Path,
-    workspace_dir: &Path,
-    output_base: &Path,
-    args: &[&'a str],
-) -> Command {
+fn bazel_command(bazel: &Path, workspace_dir: &Path, output_base: &Path, args: &[&str]) -> Command {
     let mut command = Command::new(bazel);
     command
         .arg(format!("--output_base={}", output_base.display()))
