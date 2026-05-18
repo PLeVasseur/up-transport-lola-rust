@@ -26,7 +26,8 @@
 //! LoLa samples contain a small `ULOL` frame header, hidden native-frame metadata,
 //! alignment padding, and then the application payload bytes. The payload views
 //! exposed by [`LolaTxLoan`] and [`LolaRxLease`] exclude the header, metadata, and
-//! padding.
+//! padding. Metadata is fixed when the transmit loan is reserved so the payload
+//! offset remains stable while serializers write directly into the sample.
 
 #![warn(rustdoc::bare_urls, rustdoc::broken_intra_doc_links)]
 

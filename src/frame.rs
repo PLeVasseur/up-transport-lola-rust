@@ -26,15 +26,13 @@ const LOLA_FRAME_HEADER_LEN: usize = 20;
 /// fixed LoLa event sample. The preceding `ULOL` header, encoded metadata, and
 /// alignment padding are hidden from callers.
 ///
-/// The header is refreshed when the loan is sent so changes made through
-/// [`UTxBuffer::metadata_mut`] are reflected in the native sample before it is
-/// committed.
+/// Metadata is fixed when the loan is reserved so the payload offset remains
+/// stable while serializers write directly into the exposed payload range.
 pub struct LolaTxLoan {
     metadata: UFrameMetadata,
     sample: LolaTxStorage,
     payload_offset: usize,
     payload_len: usize,
-    payload_alignment: usize,
 }
 
 enum LolaTxStorage {
@@ -80,7 +78,6 @@ impl LolaTxLoan {
             sample: LolaTxStorage::Vec(sample),
             payload_offset,
             payload_len,
-            payload_alignment,
         })
     }
 
@@ -103,64 +100,18 @@ impl LolaTxLoan {
             sample: LolaTxStorage::Native(sample),
             payload_offset,
             payload_len,
-            payload_alignment,
         })
     }
 
-    pub(crate) fn refresh_frame_header(&mut self) -> Result<(), UStatus> {
-        let sample = self.sample.as_mut_slice();
-        let old_payload_offset = self.payload_offset;
-        let old_payload_end = old_payload_offset
-            .checked_add(self.payload_len)
-            .ok_or_else(|| {
-                UStatus::fail_with_code(UCode::INVALID_ARGUMENT, "LoLa payload layout overflow")
-            })?;
-        if old_payload_end > sample.len() {
-            return Err(UStatus::fail_with_code(
-                UCode::INVALID_ARGUMENT,
-                "LoLa payload range is outside sample bounds",
-            ));
-        }
-
-        let new_payload_offset = compute_payload_offset(&self.metadata, self.payload_alignment)?;
-        let new_payload_end = new_payload_offset
-            .checked_add(self.payload_len)
-            .ok_or_else(|| {
-                UStatus::fail_with_code(UCode::INVALID_ARGUMENT, "LoLa payload layout overflow")
-            })?;
-        if new_payload_end > sample.len() {
-            return Err(UStatus::fail_with_code(
-                UCode::RESOURCE_EXHAUSTED,
-                format!(
-                    "LoLa frame requires {new_payload_end} bytes but sample has {} bytes",
-                    sample.len()
-                ),
-            ));
-        }
-        if new_payload_offset != old_payload_offset && self.payload_len != 0 {
-            sample.copy_within(old_payload_offset..old_payload_end, new_payload_offset);
-            self.payload_offset = new_payload_offset;
-        }
-        write_frame_header(
-            &self.metadata,
-            sample,
-            self.payload_len,
-            self.payload_alignment,
-        )?;
-        Ok(())
-    }
-
     #[cfg(feature = "test-stub")]
-    pub(crate) fn into_vec(mut self) -> Result<Vec<u8>, UStatus> {
-        self.refresh_frame_header()?;
+    pub(crate) fn into_vec(self) -> Result<Vec<u8>, UStatus> {
         match self.sample {
             LolaTxStorage::Vec(sample) => Ok(sample),
         }
     }
 
     #[cfg(feature = "lola-ffi")]
-    pub(crate) fn into_native(mut self) -> Result<NativeTxLoan, UStatus> {
-        self.refresh_frame_header()?;
+    pub(crate) fn into_native(self) -> Result<NativeTxLoan, UStatus> {
         if self.sample.as_slice().get(..4) != Some(LOLA_FRAME_MAGIC.as_slice()) {
             return Err(UStatus::fail_with_code(
                 UCode::INTERNAL,
@@ -176,10 +127,6 @@ impl LolaTxLoan {
 impl UTxBuffer for LolaTxLoan {
     fn metadata(&self) -> &UFrameMetadata {
         &self.metadata
-    }
-
-    fn metadata_mut(&mut self) -> &mut UFrameMetadata {
-        &mut self.metadata
     }
 
     fn payload(&self) -> &[u8] {
@@ -398,13 +345,6 @@ fn read_frame_header(sample: &[u8]) -> Result<(UFrameMetadata, usize, usize), US
         ));
     }
     Ok((metadata, payload_offset, payload_len))
-}
-
-fn compute_payload_offset(
-    metadata: &UFrameMetadata,
-    payload_alignment: usize,
-) -> Result<usize, UStatus> {
-    payload_offset_for_len(encode_metadata(metadata)?.len(), payload_alignment)
 }
 
 fn payload_offset_for_len(metadata_len: usize, payload_alignment: usize) -> Result<usize, UStatus> {
