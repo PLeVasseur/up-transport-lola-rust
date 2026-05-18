@@ -17,7 +17,7 @@ test-stub = []
 [dependencies]
 async-trait = "0.1"
 tokio = { version = "1.45.1", default-features = false, features = ["rt", "sync", "time"] }
-up-rust = { path = "/home/pete.levasseur/eclipse/uprotocol/up-rust" }
+up-rust = { git = "https://github.com/PLeVasseur/up-rust.git", rev = "988895bc855398e81a27d1529e3775120d837e97" }
 
 [build-dependencies]
 
