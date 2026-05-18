@@ -26,6 +26,20 @@ use crate::{
     frame::{LolaRxLease, LolaTxLoan},
 };
 
+/// Zero-copy uProtocol transport backed by a LoLa generic event.
+///
+/// The transport maps one native uProtocol frame to one fixed-size LoLa event
+/// sample. Transmit loans expose only the application payload range; receive
+/// leases keep the LoLa sample alive until the caller drops the lease.
+///
+/// With the `lola-ffi` feature, the transport uses the native S-CORE LoLa bridge
+/// and each listener registration owns an independent LoLa proxy subscription.
+/// With the `test-stub` feature, the transport uses an in-process queue for unit
+/// tests and does not communicate with a LoLa runtime.
+///
+/// This transport implements only the zero-copy capability. Use
+/// [`up_rust::transport::UOwnedFrameEndpoint::from_zero_copy`] when a router or
+/// bridge needs an owned-frame facade; that adapter copies at the boundary.
 pub struct UTransportLola {
     config: LolaTransportConfig,
     self_ref: Weak<UTransportLola>,
@@ -40,6 +54,12 @@ pub struct UTransportLola {
 }
 
 impl UTransportLola {
+    /// Builds a LoLa transport from validated configuration.
+    ///
+    /// # Errors
+    ///
+    /// Returns validation errors from [`LolaTransportConfig::validate`] or native
+    /// bridge initialization errors when the `lola-ffi` feature is active.
     pub fn build(config: LolaTransportConfig) -> Result<Arc<Self>, UStatus> {
         config.validate()?;
         #[cfg(feature = "lola-ffi")]
@@ -58,6 +78,7 @@ impl UTransportLola {
         }))
     }
 
+    /// Returns the configuration used to build this transport.
     pub fn config(&self) -> &LolaTransportConfig {
         &self.config
     }

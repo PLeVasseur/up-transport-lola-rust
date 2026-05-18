@@ -23,3 +23,7 @@ up-rust = { git = "https://github.com/PLeVasseur/up-rust.git", rev = "988895bc85
 
 [dev-dependencies]
 tokio = { version = "1.45.1", default-features = false, features = ["macros", "rt"] }
+
+[package.metadata.docs.rs]
+no-default-features = true
+features = ["test-stub"]

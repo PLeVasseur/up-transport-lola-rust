@@ -18,6 +18,17 @@ const LOLA_FRAME_MAGIC: &[u8; 4] = b"ULOL";
 const LOLA_FRAME_VERSION: u8 = 1;
 const LOLA_FRAME_HEADER_LEN: usize = 20;
 
+/// LoLa transmit loan for one native uProtocol frame.
+///
+/// Values are returned by the [`UZeroCopyTransport`](up_rust::zero_copy::UZeroCopyTransport)
+/// implementation for [`UTransportLola`](crate::UTransportLola). The exposed
+/// [`UTxBuffer::payload_mut`] range points at the application payload inside a
+/// fixed LoLa event sample. The preceding `ULOL` header, encoded metadata, and
+/// alignment padding are hidden from callers.
+///
+/// The header is refreshed when the loan is sent so changes made through
+/// [`UTxBuffer::metadata_mut`] are reflected in the native sample before it is
+/// committed.
 pub struct LolaTxLoan {
     metadata: UFrameMetadata,
     sample: LolaTxStorage,
@@ -194,6 +205,16 @@ impl UTxBuffer for LolaTxLoan {
     }
 }
 
+/// LoLa receive lease for one native uProtocol frame.
+///
+/// Dropping the lease releases the underlying LoLa sample. The payload is a
+/// contiguous byte range within the fixed event sample, so this type implements
+/// both [`UZeroCopyRxFrame`] and [`UContiguousZeroCopyRxFrame`]. Decoded values
+/// that borrow from [`UContiguousZeroCopyRxFrame::contiguous_payload`] must not
+/// outlive the lease.
+///
+/// Invalid or stale samples are rejected before this type is constructed. Native
+/// diagnostics include the frame magic bytes when they do not match `ULOL`.
 pub struct LolaRxLease {
     metadata: UFrameMetadata,
     sample: LolaRxStorage,

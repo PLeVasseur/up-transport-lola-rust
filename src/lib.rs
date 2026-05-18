@@ -11,6 +11,25 @@
  * SPDX-License-Identifier: Apache-2.0
  ********************************************************************************/
 
+//! Eclipse S-CORE LoLa transport for native uProtocol zero-copy frames.
+//!
+//! [`UTransportLola`] implements [`up_rust::zero_copy::UZeroCopyTransport`].
+//! Transmit payloads are serialized directly into fixed-size LoLa event samples,
+//! and receive payloads are exposed through [`LolaRxLease`] while the underlying
+//! LoLa sample is alive.
+//!
+//! The default `bundled` feature builds and links the native C++ bridge from the
+//! pinned S-CORE communication submodule. The `lola-ffi` feature uses a prebuilt
+//! bridge or the bundled build output. The `test-stub` feature provides an
+//! in-process fake backend for Rust unit tests and is not a LoLa runtime.
+//!
+//! LoLa samples contain a small `ULOL` frame header, hidden native-frame metadata,
+//! alignment padding, and then the application payload bytes. The payload views
+//! exposed by [`LolaTxLoan`] and [`LolaRxLease`] exclude the header, metadata, and
+//! padding.
+
+#![warn(rustdoc::bare_urls, rustdoc::broken_intra_doc_links)]
+
 #[cfg(all(feature = "lola-ffi", feature = "test-stub"))]
 compile_error!("features `lola-ffi` and `test-stub` are mutually exclusive");
 
