@@ -393,14 +393,16 @@ mod tests {
     use std::{sync::Arc, time::Duration};
 
     use async_trait::async_trait;
+    use protobuf::well_known_types::wrappers::StringValue;
     use tokio::sync::mpsc;
     use up_rust::{
-        wire::{RawBytes, WireFormat},
+        payload::{RawBytes, UWireError},
         zero_copy::{
             UContiguousZeroCopyRxFrame, UTxBuffer, UZeroCopyListener, UZeroCopyTransport,
             UZeroCopyTransportExt,
         },
-        UAttributes, UCode, UFrameBuilder, UFrameMetadata, UMessageType, UUri, UUID,
+        ProtobufPayload, UAttributes, UCode, UFrameBuilder, UFrameMetadata, UMessageType, UUri,
+        UUID,
     };
 
     use super::*;
@@ -463,6 +465,82 @@ mod tests {
 
         assert_eq!(received.metadata(), frame.metadata());
         assert_eq!(received.contiguous_payload(), frame.payload_bytes());
+    }
+
+    #[tokio::test]
+    async fn stub_backend_round_trips_protobuf_payload_codec() {
+        let transport = UTransportLola::build(config()).unwrap();
+        let topic = UUri::try_from_parts("vehicle", 0x4210, 1, 0x9004).unwrap();
+        let mut payload = StringValue::new();
+        payload.value = "protobuf over lola stub".to_string();
+
+        transport
+            .send_serialized_zero_copy::<ProtobufPayload, _>(
+                UFrameMetadata::publish(topic.clone()),
+                &payload,
+            )
+            .await
+            .unwrap();
+
+        let mut received = None;
+        for _ in 0..100 {
+            match transport.receive_zero_copy(&topic, None).await {
+                Ok(frame) => {
+                    received = Some(frame);
+                    break;
+                }
+                Err(status) if status.get_code() == UCode::NOT_FOUND => {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+                Err(status) => panic!("unexpected LoLa receive error: {status:?}"),
+            }
+        }
+        let received = received.expect("timed out waiting for LoLa protobuf sample");
+        let decoded: StringValue = received
+            .deserialize_borrowed::<ProtobufPayload, _>()
+            .unwrap();
+
+        assert_eq!(
+            received.metadata().encoding(),
+            Some(&ProtobufPayload::encoding())
+        );
+        assert_eq!(decoded.value, payload.value);
+    }
+
+    #[tokio::test]
+    async fn stub_backend_rejects_wrong_inner_payload_codec_after_receive() {
+        let transport = UTransportLola::build(config()).unwrap();
+        let topic = UUri::try_from_parts("vehicle", 0x4210, 1, 0x9005).unwrap();
+
+        transport
+            .send_serialized_zero_copy::<RawBytes, _>(
+                UFrameMetadata::publish(topic.clone()),
+                &&[0x0a_u8][..],
+            )
+            .await
+            .unwrap();
+
+        let mut received = None;
+        for _ in 0..100 {
+            match transport.receive_zero_copy(&topic, None).await {
+                Ok(frame) => {
+                    received = Some(frame);
+                    break;
+                }
+                Err(status) if status.get_code() == UCode::NOT_FOUND => {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+                Err(status) => panic!("unexpected LoLa receive error: {status:?}"),
+            }
+        }
+        let received = received.expect("timed out waiting for LoLa raw sample");
+        let result = received.deserialize_borrowed::<ProtobufPayload, StringValue>();
+
+        assert_eq!(received.metadata().encoding(), Some(&RawBytes::encoding()));
+        assert!(matches!(
+            result,
+            Err(UWireError::UnsupportedEncoding { .. })
+        ));
     }
 
     #[tokio::test]
@@ -623,7 +701,7 @@ mod native_tests {
     use async_trait::async_trait;
     use tokio::sync::mpsc;
     use up_rust::{
-        wire::{RawBytes, WireFormat},
+        payload::RawBytes,
         zero_copy::{
             UContiguousZeroCopyRxFrame, UTxBuffer, UZeroCopyListener, UZeroCopyTransport,
             UZeroCopyTransportExt,
