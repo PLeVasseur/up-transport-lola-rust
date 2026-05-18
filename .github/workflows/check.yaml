@@ -43,13 +43,16 @@ jobs:
       matrix:
         include:
           - name: stub
-            features: --no-default-features --features test-stub
+            cargo_flags: --no-default-features --features test-stub
+            test_args: ""
             needs_bazel: false
           - name: bundled-native
-            features: ""
+            cargo_flags: ""
+            test_args: ""
             needs_bazel: true
-          - name: native-smoke
-            features: --features native-smoke
+          - name: native-runtime
+            cargo_flags: ""
+            test_args: -- --ignored
             needs_bazel: true
     name: ${{ matrix.name }}
     steps:
@@ -73,13 +76,13 @@ jobs:
           echo "BAZEL=/tmp/bazelisk" >> "$GITHUB_ENV"
 
       - name: Check
-        run: cargo check --all-targets ${{ matrix.features }}
+        run: cargo check --all-targets ${{ matrix.cargo_flags }}
 
       - name: Test
-        run: cargo test --all-targets ${{ matrix.features }}
+        run: cargo test --all-targets ${{ matrix.cargo_flags }} ${{ matrix.test_args }}
 
       - name: Clippy
-        run: cargo clippy --all-targets ${{ matrix.features }} -- -D warnings
+        run: cargo clippy --all-targets ${{ matrix.cargo_flags }} -- -D warnings
 
   docs:
     runs-on: ubuntu-22.04

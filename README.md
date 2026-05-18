@@ -32,8 +32,9 @@ The submodule is pinned to Eclipse S-CORE communication commit `56c36d4059d276e8
 - `bundled`: enables `lola-build-from-source`.
 - `lola-build-from-source`: generates an isolated Bazel workspace under `OUT_DIR`, builds `libup_lola_bridge.so`, and links Cargo against it.
 - `lola-ffi`: enables the Rust FFI backend and expects a prebuilt bridge via `LOLA_BRIDGE_LIB_DIR` unless `lola-build-from-source` is also enabled.
-- `native-smoke`: enables native runtime smoke tests. These use `tests/fixtures/mw_com_config.json` by default.
 - `test-stub`: enables the in-process fake backend for fast Rust unit tests. It is not a LoLa runtime.
+
+Native runtime tests are compiled when `lola-ffi` is enabled and are marked ignored by default. Run them explicitly with `cargo test -- --ignored`.
 
 ## Build Options
 
@@ -81,9 +82,15 @@ The bridge exposes the LoLa event slot's raw sample storage to Rust. S-CORE's cu
 
 The bridge separates provider and subscriber ownership. `NativeTransport` owns the `GenericSkeleton`/`GenericSkeletonEvent` path used for `Allocate` and `Send`; each direct receive path or registered listener owns a separate `GenericProxy`/`GenericProxyEvent` subscription. This mirrors the S-CORE Rust binding model and lets a local listener and a streamer listener receive the same LoLa event through independent subscription queues.
 
+## Logging
+
+S-CORE logging is configured with `MW_LOG_CONFIG_FILE` or `./etc/logging.json`. If `MW_LOG_CONFIG_FILE` is unset, the LoLa bridge automatically uses a `logging.json` file beside the configured `mw_com_config.json` when one exists. If there is no sibling logging config, the bridge writes a quiet temporary config and points S-CORE at it. The checked-in native test fixture includes `tests/fixtures/logging.json` for explicit, reproducible test logging.
+
+Set `MW_LOG_CONFIG_FILE` explicitly to override this behavior.
+
 ## Tests
 
-Build and link the native bridge:
+Build and link the native bridge. Native runtime tests are ignored by default:
 
 ```sh
 BAZEL=/path/to/bazelisk cargo test
@@ -95,19 +102,19 @@ Run the fake unit-test backend:
 cargo test --no-default-features --features test-stub
 ```
 
-The native end-to-end smoke test is compiled and run only with `native-smoke`. It uses `tests/fixtures/mw_com_config.json` by default:
+Run the ignored native runtime tests. They use `tests/fixtures/mw_com_config.json` and its sibling `logging.json` by default:
 
 ```sh
 BAZEL=/path/to/bazelisk \
-cargo test --features native-smoke
+cargo test -- --ignored
 ```
 
-With the checked-in fixture, the native smoke covers direct reserve/send/receive loopback and two independent listener subscriptions receiving the same LoLa event. Invalid frame magic diagnostics still include the first four sample bytes to make stale, foreign, or incorrectly mapped shared-memory samples actionable.
+With the checked-in fixture, the native runtime tests cover direct reserve/send/receive loopback and two independent listener subscriptions receiving the same LoLa event. Invalid frame magic diagnostics still include the first four sample bytes to make stale, foreign, or incorrectly mapped shared-memory samples actionable.
 
 Override the checked-in fixture when needed:
 
 ```sh
-LOLA_NATIVE_SMOKE_CONFIG=/path/to/mw_com_config.json \
+LOLA_NATIVE_TEST_CONFIG=/path/to/mw_com_config.json \
 BAZEL=/path/to/bazelisk \
-cargo test --features native-smoke
+cargo test -- --ignored
 ```

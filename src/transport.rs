@@ -595,7 +595,7 @@ mod tests {
     }
 }
 
-#[cfg(all(test, feature = "native-smoke"))]
+#[cfg(all(test, feature = "lola-ffi"))]
 mod native_tests {
     use std::sync::OnceLock;
 
@@ -612,7 +612,7 @@ mod native_tests {
 
     use super::*;
 
-    static NATIVE_SMOKE_LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
+    static NATIVE_TEST_LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
 
     struct NativeListenerSender(mpsc::UnboundedSender<Vec<u8>>);
 
@@ -625,31 +625,31 @@ mod native_tests {
         }
     }
 
-    fn native_smoke_config() -> LolaTransportConfig {
+    fn native_test_config() -> LolaTransportConfig {
         let fixture_config_path = concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/tests/fixtures/mw_com_config.json"
         );
-        let mw_com_config_path = std::env::var("LOLA_NATIVE_SMOKE_CONFIG")
+        let mw_com_config_path = std::env::var("LOLA_NATIVE_TEST_CONFIG")
             .unwrap_or_else(|_| fixture_config_path.to_string());
         LolaTransportConfig {
-            local_authority: std::env::var("LOLA_NATIVE_SMOKE_AUTHORITY")
+            local_authority: std::env::var("LOLA_NATIVE_TEST_AUTHORITY")
                 .unwrap_or_else(|_| "vehicle".to_string()),
-            instance_specifier: std::env::var("LOLA_NATIVE_SMOKE_INSTANCE_SPECIFIER")
+            instance_specifier: std::env::var("LOLA_NATIVE_TEST_INSTANCE_SPECIFIER")
                 .unwrap_or_else(|_| "uprotocol/transport".to_string()),
-            service_type: std::env::var("LOLA_NATIVE_SMOKE_SERVICE_TYPE")
+            service_type: std::env::var("LOLA_NATIVE_TEST_SERVICE_TYPE")
                 .unwrap_or_else(|_| "/uprotocol/Transport".to_string()),
-            event_name: std::env::var("LOLA_NATIVE_SMOKE_EVENT_NAME")
+            event_name: std::env::var("LOLA_NATIVE_TEST_EVENT_NAME")
                 .unwrap_or_else(|_| "frame".to_string()),
-            sample_size: std::env::var("LOLA_NATIVE_SMOKE_SAMPLE_SIZE")
+            sample_size: std::env::var("LOLA_NATIVE_TEST_SAMPLE_SIZE")
                 .ok()
                 .and_then(|value| value.parse().ok())
                 .unwrap_or(512),
-            sample_alignment: std::env::var("LOLA_NATIVE_SMOKE_SAMPLE_ALIGNMENT")
+            sample_alignment: std::env::var("LOLA_NATIVE_TEST_SAMPLE_ALIGNMENT")
                 .ok()
                 .and_then(|value| value.parse().ok())
                 .unwrap_or(8),
-            max_samples: std::env::var("LOLA_NATIVE_SMOKE_MAX_SAMPLES")
+            max_samples: std::env::var("LOLA_NATIVE_TEST_MAX_SAMPLES")
                 .ok()
                 .and_then(|value| value.parse().ok())
                 .unwrap_or(4),
@@ -657,17 +657,18 @@ mod native_tests {
         }
     }
 
-    async fn native_smoke_guard() -> tokio::sync::MutexGuard<'static, ()> {
-        NATIVE_SMOKE_LOCK
+    async fn native_test_guard() -> tokio::sync::MutexGuard<'static, ()> {
+        NATIVE_TEST_LOCK
             .get_or_init(|| tokio::sync::Mutex::new(()))
             .lock()
             .await
     }
 
     #[tokio::test]
+    #[ignore = "requires the native S-CORE LoLa runtime fixture"]
     async fn native_reserve_send_receive_round_trips_payload() {
-        let _guard = native_smoke_guard().await;
-        let config = native_smoke_config();
+        let _guard = native_test_guard().await;
+        let config = native_test_config();
         let authority = config.local_authority.clone();
         let transport = UTransportLola::build(config).unwrap();
         let topic = UUri::try_from_parts(&authority, 0x4210, 1, 0x9000).unwrap();
@@ -713,9 +714,10 @@ mod native_tests {
     }
 
     #[tokio::test]
+    #[ignore = "requires the native S-CORE LoLa runtime fixture"]
     async fn native_two_listeners_receive_same_payload() {
-        let _guard = native_smoke_guard().await;
-        let config = native_smoke_config();
+        let _guard = native_test_guard().await;
+        let config = native_test_config();
         let authority = config.local_authority.clone();
         let transport = UTransportLola::build(config).unwrap();
         let topic = UUri::try_from_parts(&authority, 0x4210, 1, 0x9001).unwrap();
@@ -768,9 +770,10 @@ mod native_tests {
     }
 
     #[tokio::test]
+    #[ignore = "requires the native S-CORE LoLa runtime fixture"]
     async fn native_exact_and_source_wildcard_listeners_receive_same_payload() {
-        let _guard = native_smoke_guard().await;
-        let config = native_smoke_config();
+        let _guard = native_test_guard().await;
+        let config = native_test_config();
         let authority = config.local_authority.clone();
         let transport = UTransportLola::build(config).unwrap();
         let topic = UUri::try_from_parts(&authority, 0x4210, 1, 0x9002).unwrap();
@@ -822,9 +825,10 @@ mod native_tests {
     }
 
     #[tokio::test]
+    #[ignore = "requires the native S-CORE LoLa runtime fixture"]
     async fn native_exact_and_sink_wildcard_listeners_receive_same_targeted_payload() {
-        let _guard = native_smoke_guard().await;
-        let config = native_smoke_config();
+        let _guard = native_test_guard().await;
+        let config = native_test_config();
         let authority = config.local_authority.clone();
         let transport = UTransportLola::build(config).unwrap();
         let source = UUri::try_from_parts(&authority, 0x4210, 1, 0x9003).unwrap();

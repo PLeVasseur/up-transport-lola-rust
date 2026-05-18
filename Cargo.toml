@@ -12,7 +12,6 @@ default = ["bundled"]
 bundled = ["lola-build-from-source"]
 lola-ffi = []
 lola-build-from-source = ["lola-ffi"]
-native-smoke = ["lola-ffi"]
 test-stub = []
 
 [dependencies]

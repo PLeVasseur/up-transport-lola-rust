@@ -1,0 +1,8 @@
+{
+  "appId": "UPLO",
+  "appDesc": "up-transport-lola-rust",
+  "logLevel": "kWarn",
+  "logLevelThresholdConsole": "kWarn",
+  "logMode": "kConsole",
+  "dynamicDatarouterIdentifiers": true
+}

@@ -13,7 +13,9 @@
 #include "score/mw/com/types.h"
 
 #include <algorithm>
+#include <cstdlib>
 #include <cstring>
+#include <fstream>
 #include <limits>
 #include <memory>
 #include <mutex>
@@ -22,6 +24,8 @@
 #include <string_view>
 #include <utility>
 #include <vector>
+
+#include <unistd.h>
 
 namespace
 {
@@ -38,6 +42,16 @@ using score::mw::com::SampleAllocateePtr;
 using score::mw::com::SamplePtr;
 using score::mw::com::impl::SampleAllocateePtrView;
 using score::mw::com::impl::lola::EventDataStorage;
+
+constexpr std::string_view kDefaultLoggingConfigJson = R"json({
+  "appId": "UPLO",
+  "appDesc": "up-transport-lola-rust",
+  "logLevel": "kWarn",
+  "logLevelThresholdConsole": "kWarn",
+  "logMode": "kConsole",
+  "dynamicDatarouterIdentifiers": true
+}
+)json";
 
 std::optional<std::string> to_string(const UpLolaStr& value)
 {
@@ -114,6 +128,10 @@ std::uint8_t* generic_sample_data(SampleAllocateePtr<void>& sample,
     return raw_slots + slot_offset;
 }
 
+std::optional<std::string> sibling_logging_config_path(const std::string& config_path);
+std::optional<std::string> write_default_logging_config();
+void configure_logging(const std::string& config_path);
+
 UpLolaStatusCode initialize_runtime_once(const std::string& config_path)
 {
     if (config_path.empty())
@@ -129,10 +147,70 @@ UpLolaStatusCode initialize_runtime_once(const std::string& config_path)
         return UP_LOLA_STATUS_OK;
     }
 
+    configure_logging(config_path);
     score::mw::com::runtime::RuntimeConfiguration runtime_configuration{config_path.c_str()};
     score::mw::com::runtime::InitializeRuntime(runtime_configuration);
     initialized = true;
     return UP_LOLA_STATUS_OK;
+}
+
+std::optional<std::string> sibling_logging_config_path(const std::string& config_path)
+{
+    if (config_path.empty())
+    {
+        return std::nullopt;
+    }
+
+    const auto separator = config_path.find_last_of("/\\");
+    const auto logging_path = separator == std::string::npos ? std::string{"logging.json"}
+                                                              : config_path.substr(0U, separator + 1U) + "logging.json";
+    std::ifstream logging_config{logging_path};
+    if (!logging_config.good())
+    {
+        return std::nullopt;
+    }
+    return logging_path;
+}
+
+void configure_logging(const std::string& config_path)
+{
+    const char* const existing_logging_config = std::getenv("MW_LOG_CONFIG_FILE");
+    if (existing_logging_config != nullptr && existing_logging_config[0] != '\0')
+    {
+        return;
+    }
+
+    auto logging_path = sibling_logging_config_path(config_path);
+    if (!logging_path.has_value())
+    {
+        logging_path = write_default_logging_config();
+    }
+    if (logging_path.has_value())
+    {
+        static_cast<void>(::setenv("MW_LOG_CONFIG_FILE", logging_path->c_str(), 0));
+    }
+}
+
+std::optional<std::string> write_default_logging_config()
+{
+    const char* const tmpdir_env = std::getenv("TMPDIR");
+    const std::string_view tmpdir = tmpdir_env != nullptr && tmpdir_env[0] != '\0' ? std::string_view{tmpdir_env}
+                                                                                  : std::string_view{"/tmp"};
+    const auto separator = !tmpdir.empty() && tmpdir.back() == '/' ? std::string{} : std::string{"/"};
+    const auto logging_path = std::string{tmpdir} + separator + "up_lola_logging_" + std::to_string(::getpid()) +
+                              ".json";
+
+    std::ofstream logging_config{logging_path, std::ios::trunc};
+    if (!logging_config.good())
+    {
+        return std::nullopt;
+    }
+    logging_config << kDefaultLoggingConfigJson;
+    if (!logging_config.good())
+    {
+        return std::nullopt;
+    }
+    return logging_path;
 }
 
 }  // namespace
