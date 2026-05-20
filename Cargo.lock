@@ -509,8 +509,8 @@ checksum = "e6e4313cd5fcd3dad5cafa179702e2b244f760991f45397d14d4ebf38247da75"
 
 [[package]]
 name = "up-rust"
-version = "0.10.0-SNAPSHOT"
-source = "git+https://github.com/PLeVasseur/up-rust.git?rev=46afb8551077d65df66de29059629332a6fdd501#46afb8551077d65df66de29059629332a6fdd501"
+version = "0.11.0-SNAPSHOT"
+source = "git+https://github.com/PLeVasseur/up-rust.git?rev=0b0201a8fa7a30c98c78c41221a4fac9eac954d8#0b0201a8fa7a30c98c78c41221a4fac9eac954d8"
 dependencies = [
  "async-trait",
  "base64",
@@ -529,7 +529,7 @@ dependencies = [
 
 [[package]]
 name = "up-transport-lola-rust"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "protobuf",
