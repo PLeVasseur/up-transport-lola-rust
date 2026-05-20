@@ -5,6 +5,8 @@ edition = "2021"
 description = "Eclipse S-CORE LoLa zero-copy transport for Eclipse uProtocol"
 keywords = ["uProtocol", "LoLa", "S-CORE", "zero-copy", "shared-memory"]
 license = "Apache-2.0"
+readme = "README.md"
+repository = "https://github.com/eclipse-uprotocol/up-transport-lola-rust"
 build = "build.rs"
 
 [features]
@@ -29,3 +31,7 @@ up-rust = { git = "https://github.com/PLeVasseur/up-rust.git", rev = "46afb85510
 [package.metadata.docs.rs]
 no-default-features = true
 features = ["test-stub"]
+rustdoc-args = ["--cfg", "docsrs"]
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(docsrs)'] }

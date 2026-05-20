@@ -30,6 +30,7 @@
 //! offset remains stable while serializers write directly into the sample.
 
 #![warn(rustdoc::bare_urls, rustdoc::broken_intra_doc_links)]
+#![cfg_attr(docsrs, feature(doc_cfg))]
 
 #[cfg(all(feature = "lola-ffi", feature = "test-stub"))]
 compile_error!("features `lola-ffi` and `test-stub` are mutually exclusive");

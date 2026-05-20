@@ -2,6 +2,38 @@
 
 Zero-copy uProtocol transport for Eclipse S-CORE LoLa.
 
+`UTransportLola` implements `up_rust::zero_copy::UZeroCopyTransport`. It exposes LoLa event samples as native uProtocol frames: callers write only application payload bytes, while the binding stores routing attributes and payload encoding metadata in a hidden `ULOL` frame header and metadata block.
+
+| uProtocol frame part | LoLa representation |
+| --- | --- |
+| Frame magic/version and lengths | Hidden `ULOL` header |
+| `UAttributes` | Hidden native-frame metadata block |
+| `UEncoding.format_id` / `content_type` / `schema_ref` | Hidden native-frame metadata block |
+| Alignment padding | Hidden between metadata and payload |
+| Application payload bytes | Exposed `LolaTxLoan` / `LolaRxLease` payload slice |
+
+Metadata is final at `reserve`, so LoLa can compute the metadata length and aligned payload offset before returning the transmit loan. After reserve, `payload_mut()` is the only mutable zero-copy surface.
+
+## Typed Payloads
+
+Use `PayloadFormat` serializers to write directly into a LoLa loan:
+
+```rust
+use up_rust::{payload::RawBytes, zero_copy::UZeroCopyTransportExt, UFrameMetadata};
+
+async fn send<T>(transport: &T, metadata: UFrameMetadata) -> Result<(), up_rust::UStatus>
+where
+    T: up_rust::zero_copy::UZeroCopyTransport,
+{
+let payload: &[u8] = b"payload";
+transport
+    .send_serialized_zero_copy::<RawBytes, _>(metadata, &payload)
+    .await
+}
+```
+
+Receive code should use `UZeroCopyRxFrame::deserialize_from_reader::<Codec, T>()` for owned decodes, or `UContiguousZeroCopyRxFrame::deserialize_borrowed::<Codec, T>()` when the decoded type borrows directly from the LoLa sample payload.
+
 The default build follows the same bundled-native model as the vSomeIP transport: it uses the pinned S-CORE communication submodule, builds the C++ LoLa bridge with Bazel/Bzlmod, and links Cargo against the generated `libup_lola_bridge.so`.
 
 ## First-Time Build
