@@ -8,7 +8,7 @@ Zero-copy uProtocol transport for Eclipse S-CORE LoLa.
 | --- | --- |
 | Frame magic/version and lengths | Hidden `ULOL` header |
 | `UAttributes` | Hidden native-frame metadata block |
-| `UEncoding.format_id` / `content_type` / `schema_ref` | Hidden native-frame metadata block |
+| `PayloadEncoding` | Hidden native-frame metadata block |
 | Alignment padding | Hidden between metadata and payload |
 | Application payload bytes | Exposed `LolaTxLoan` / `LolaRxLease` payload slice |
 

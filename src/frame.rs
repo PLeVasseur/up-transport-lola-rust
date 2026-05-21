@@ -8,7 +8,8 @@ use std::io::Cursor;
 
 use up_rust::{
     zero_copy::{UContiguousZeroCopyRxFrame, UTxBuffer, UZeroCopyRxFrame},
-    UAttributes, UCode, UEncoding, UFrameMetadata, UMessageType, UPriority, UStatus, UUri, UUID,
+    PayloadEncoding, UAttributes, UCode, UFrameMetadata, UMessageType, UPayloadFormat, UPriority,
+    UStatus, UUri, UUID,
 };
 
 #[cfg(feature = "lola-ffi")]
@@ -391,9 +392,7 @@ fn encode_metadata(metadata: &UFrameMetadata) -> Result<Vec<u8>, UStatus> {
     )?;
     if let Some(encoding) = metadata.encoding() {
         bytes.push(1);
-        append_string(&mut bytes, encoding.format_id())?;
-        append_string(&mut bytes, encoding.content_type())?;
-        append_string(&mut bytes, encoding.schema_ref().unwrap_or_default())?;
+        encode_payload_encoding(&mut bytes, encoding)?;
     } else {
         bytes.push(0);
     }
@@ -427,21 +426,7 @@ fn decode_metadata(mut bytes: &[u8]) -> Result<UFrameMetadata, UStatus> {
     };
     let encoding = match take_u8(&mut bytes)? {
         0 => None,
-        1 => {
-            let format_id = take_string(&mut bytes)?;
-            let content_type = take_string(&mut bytes)?;
-            let schema_ref = take_string(&mut bytes)?;
-            let schema_ref = if schema_ref.is_empty() {
-                None
-            } else {
-                Some(schema_ref)
-            };
-            Some(
-                UEncoding::try_new(format_id, content_type, schema_ref).map_err(|err| {
-                    invalid_metadata(format!("invalid LoLa payload encoding: {err}"))
-                })?,
-            )
-        }
+        1 => Some(decode_payload_encoding(&mut bytes)?),
         _ => {
             return Err(UStatus::fail_with_code(
                 UCode::INVALID_ARGUMENT,
@@ -481,6 +466,36 @@ fn decode_metadata(mut bytes: &[u8]) -> Result<UFrameMetadata, UStatus> {
         ));
     }
     Ok(UFrameMetadata::new(attributes, encoding))
+}
+
+fn encode_payload_encoding(bytes: &mut Vec<u8>, encoding: &PayloadEncoding) -> Result<(), UStatus> {
+    match encoding {
+        PayloadEncoding::Standard(format) => {
+            bytes.push(0);
+            bytes.push(format.value());
+        }
+        PayloadEncoding::Custom(custom) => {
+            bytes.push(1);
+            append_string(bytes, custom.id())?;
+            append_string(bytes, custom.content_type())?;
+        }
+    }
+    Ok(())
+}
+
+fn decode_payload_encoding(bytes: &mut &[u8]) -> Result<PayloadEncoding, UStatus> {
+    match take_u8(bytes)? {
+        0 => {
+            let value = take_u8(bytes)?;
+            let format = UPayloadFormat::from_u8(value)
+                .ok_or_else(|| invalid_metadata(format!("invalid LoLa payload format {value}")))?;
+            Ok(PayloadEncoding::standard(format))
+        }
+        1 => PayloadEncoding::try_custom(take_string(bytes)?, take_string(bytes)?).map_err(|err| {
+            invalid_metadata(format!("invalid LoLa custom payload encoding: {err}"))
+        }),
+        _ => Err(invalid_metadata("invalid LoLa payload encoding kind")),
+    }
 }
 
 fn write_u64(dst: &mut Vec<u8>, value: u64) {
