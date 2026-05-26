@@ -192,7 +192,7 @@ fn bazelrc() -> &'static str {
     r#"common --action_env=BAZEL_DO_NOT_DETECT_CPP_TOOLCHAIN=1
 common --platforms=@score_bazel_platforms//:x86_64-linux-gcc_12.2.0-posix
 common --extra_toolchains=@score_gcc_x86_64_toolchain//:x86_64-linux
-common --registry=https://raw.githubusercontent.com/eclipse-score/bazel_registry/refs/heads/main/
+common --registry=https://raw.githubusercontent.com/eclipse-score/bazel_registry/527d5de89a2bc54c80b71b54a6997788c2b67d35/
 common --registry=https://bcr.bazel.build
 common --@score_baselibs//score/json:base_library=nlohmann
 common --@score_baselibs//score/memory/shared/flags:use_typedshmd=False

@@ -11,8 +11,10 @@ on:
       - "build.rs"
       - "cpp/**"
       - "src/**"
+      - "scripts/**"
       - "tests/**"
       - "third_party/**"
+      - "tools/**"
   workflow_dispatch:
 
 concurrency:
@@ -68,12 +70,12 @@ jobs:
         if: matrix.needs_bazel
         run: sudo apt-get update && sudo apt-get install -y build-essential curl git
 
-      - name: Install Bazelisk
+      - name: Bootstrap Bazelisk
         if: matrix.needs_bazel
         run: |
-          curl -fsSL -o /tmp/bazelisk https://github.com/bazelbuild/bazelisk/releases/download/v1.27.0/bazelisk-linux-amd64
-          chmod +x /tmp/bazelisk
-          echo "BAZEL=/tmp/bazelisk" >> "$GITHUB_ENV"
+          scripts/run-native-validation.sh bootstrap
+          version=$(tr -d '[:space:]' < tools/bazelisk.version)
+          echo "BAZEL=${GITHUB_WORKSPACE}/.cache/tools/bazelisk-${version}-linux-amd64" >> "$GITHUB_ENV"
 
       - name: Check
         run: cargo check --all-targets ${{ matrix.cargo_flags }}
@@ -93,10 +95,10 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - name: Install native build dependencies
         run: sudo apt-get update && sudo apt-get install -y build-essential curl git
-      - name: Install Bazelisk
+      - name: Bootstrap Bazelisk
         run: |
-          curl -fsSL -o /tmp/bazelisk https://github.com/bazelbuild/bazelisk/releases/download/v1.27.0/bazelisk-linux-amd64
-          chmod +x /tmp/bazelisk
-          echo "BAZEL=/tmp/bazelisk" >> "$GITHUB_ENV"
+          scripts/run-native-validation.sh bootstrap
+          version=$(tr -d '[:space:]' < tools/bazelisk.version)
+          echo "BAZEL=${GITHUB_WORKSPACE}/.cache/tools/bazelisk-${version}-linux-amd64" >> "$GITHUB_ENV"
       - name: Build docs
         run: RUSTDOCFLAGS=-Dwarnings cargo doc --no-deps

@@ -16,14 +16,14 @@ use tokio::{sync::Mutex, task::JoinHandle};
 use up_rust::{
     transport::{validate_frame_metadata_for_payload, verify_filter_criteria},
     zero_copy::{UZeroCopyListener, UZeroCopyRxFrame, UZeroCopyTransport},
-    UCode, UFrameMetadata, UStatus, UUri,
+    UCode, UFrameMetadata, UStatus, UUri, UZeroCopyUninitTransport,
 };
 
 #[cfg(feature = "lola-ffi")]
 use crate::sys::{NativeSubscriber, NativeTransport};
 use crate::{
     config::LolaTransportConfig,
-    frame::{LolaRxLease, LolaTxLoan},
+    frame::{LolaRxLease, LolaTxLoan, LolaUninitTxLoan},
 };
 
 /// Zero-copy uProtocol transport backed by a LoLa generic event.
@@ -367,6 +367,46 @@ impl UZeroCopyTransport for UTransportLola {
     }
 }
 
+#[async_trait]
+impl UZeroCopyUninitTransport for UTransportLola {
+    type UninitTx = LolaUninitTxLoan;
+
+    async fn reserve_uninit(
+        &self,
+        metadata: UFrameMetadata,
+        payload_len: usize,
+        alignment: usize,
+    ) -> Result<Self::UninitTx, UStatus> {
+        validate_alignment(alignment)?;
+        if alignment > self.config.sample_alignment {
+            return Err(UStatus::fail_with_code(
+                UCode::INVALID_ARGUMENT,
+                format!(
+                    "requested payload alignment {alignment} exceeds LoLa sample alignment {}",
+                    self.config.sample_alignment
+                ),
+            ));
+        }
+        if metadata.encoding().is_none() && payload_len != 0 {
+            return Err(UStatus::fail_with_code(
+                UCode::INVALID_ARGUMENT,
+                "message payload is present but payload encoding is absent",
+            ));
+        }
+        validate_frame_metadata_for_payload(&metadata, metadata.encoding().is_some())?;
+
+        #[cfg(feature = "test-stub")]
+        {
+            LolaUninitTxLoan::new_vec(metadata, self.config.sample_size, payload_len, alignment)
+        }
+        #[cfg(feature = "lola-ffi")]
+        {
+            let sample = self.native.reserve()?;
+            LolaUninitTxLoan::new_native(metadata, sample, payload_len, alignment)
+        }
+    }
+}
+
 fn validate_alignment(alignment: usize) -> Result<(), UStatus> {
     if alignment == 0 || !alignment.is_power_of_two() {
         return Err(UStatus::fail_with_code(
@@ -390,22 +430,50 @@ fn frame_matches(frame: &LolaRxLease, source_filter: &UUri, sink_filter: Option<
 
 #[cfg(all(test, feature = "test-stub", not(feature = "lola-ffi")))]
 mod tests {
-    use std::{sync::Arc, time::Duration};
+    use std::{mem, sync::Arc, time::Duration};
 
     use async_trait::async_trait;
     use protobuf::well_known_types::wrappers::StringValue;
     use tokio::sync::mpsc;
     use up_rust::{
-        payload::{RawBytes, UWireError},
+        payload::{PlacementDefault, RawBytes, StableContainerPayload, UWireError},
+        test_util::zero_copy_conformance,
         zero_copy::{
             UContiguousZeroCopyRxFrame, UTxBuffer, UZeroCopyListener, UZeroCopyTransport,
             UZeroCopyTransportExt,
         },
         ProtobufPayload, UAttributes, UCode, UFrameBuilder, UFrameMetadata, UMessageType, UUri,
-        UUID,
+        UZeroCopyUninitTransportExt, UUID,
     };
 
     use super::*;
+
+    #[repr(C)]
+    #[derive(
+        Clone,
+        Copy,
+        Debug,
+        Default,
+        Eq,
+        PartialEq,
+        PlacementDefault,
+        up_rust::StablePayload,
+        up_rust::ByteBackedStablePayload,
+    )]
+    #[stable_payload(type_name = "example.vehicle.VehiclePose")]
+    struct VehiclePose {
+        x: u32,
+        y: u32,
+    }
+
+    fn bytes_of_pose(pose: &VehiclePose) -> &[u8] {
+        unsafe {
+            std::slice::from_raw_parts(
+                (pose as *const VehiclePose).cast::<u8>(),
+                mem::size_of::<VehiclePose>(),
+            )
+        }
+    }
 
     struct ListenerSender(mpsc::UnboundedSender<(UFrameMetadata, Vec<u8>)>);
 
@@ -505,6 +573,175 @@ mod tests {
             Some(&ProtobufPayload::encoding())
         );
         assert_eq!(decoded.value, payload.value);
+    }
+
+    #[tokio::test]
+    async fn stub_backend_round_trips_stable_container_payload() {
+        let transport = UTransportLola::build(config()).unwrap();
+        let topic = UUri::try_from_parts("vehicle", 0x4210, 1, 0x9006).unwrap();
+
+        transport
+            .send_loaned_payload_as::<StableContainerPayload<VehiclePose>, VehiclePose>(
+                UFrameMetadata::publish(topic.clone()),
+                |payload| {
+                    payload.x = 21;
+                    payload.y = 34;
+                },
+            )
+            .await
+            .unwrap();
+
+        let mut received = None;
+        for _ in 0..100 {
+            match transport.receive_zero_copy(&topic, None).await {
+                Ok(frame) => {
+                    received = Some(frame);
+                    break;
+                }
+                Err(status) if status.get_code() == UCode::NOT_FOUND => {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+                Err(status) => panic!("unexpected LoLa receive error: {status:?}"),
+            }
+        }
+        let received = received.expect("timed out waiting for LoLa stable-container sample");
+        zero_copy_conformance::verify_loaned_rx_payload_layout_for(
+            &received,
+            mem::size_of::<VehiclePose>(),
+            mem::align_of::<VehiclePose>(),
+        )
+        .unwrap();
+        let pose = zero_copy_conformance::borrow_loaned_payload_as::<
+            StableContainerPayload<VehiclePose>,
+            VehiclePose,
+        >(&received)
+        .unwrap();
+
+        assert_eq!(
+            received.metadata().encoding(),
+            Some(&StableContainerPayload::<VehiclePose>::encoding())
+        );
+        assert_eq!(
+            received.contiguous_payload().as_ptr() as usize % mem::align_of::<VehiclePose>(),
+            0
+        );
+        assert_eq!(pose, &VehiclePose { x: 21, y: 34 });
+    }
+
+    #[tokio::test]
+    async fn stub_backend_round_trips_stable_container_uninit_payload() {
+        let transport = UTransportLola::build(config()).unwrap();
+        let topic = UUri::try_from_parts("vehicle", 0x4210, 1, 0x9008).unwrap();
+
+        transport
+            .send_uninit_loaned_payload_as::<StableContainerPayload<VehiclePose>, VehiclePose>(
+                UFrameMetadata::publish(topic.clone()),
+                |slot| Ok(slot.write(VehiclePose { x: 55, y: 89 })),
+            )
+            .await
+            .unwrap();
+
+        let mut received = None;
+        for _ in 0..100 {
+            match transport.receive_zero_copy(&topic, None).await {
+                Ok(frame) => {
+                    received = Some(frame);
+                    break;
+                }
+                Err(status) if status.get_code() == UCode::NOT_FOUND => {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+                Err(status) => panic!("unexpected LoLa receive error: {status:?}"),
+            }
+        }
+        let received = received.expect("timed out waiting for LoLa stable-container sample");
+        let pose = zero_copy_conformance::borrow_loaned_payload_as::<
+            StableContainerPayload<VehiclePose>,
+            VehiclePose,
+        >(&received)
+        .unwrap();
+
+        assert_eq!(pose, &VehiclePose { x: 55, y: 89 });
+    }
+
+    #[tokio::test]
+    async fn stub_backend_uninit_reserve_rejects_excessive_alignment() {
+        let transport = UTransportLola::build(config()).unwrap();
+        let topic = UUri::try_from_parts("vehicle", 0x4210, 1, 0x9009).unwrap();
+
+        let result = transport
+            .reserve_uninit(UFrameMetadata::publish(topic), 8, 16)
+            .await;
+        let Err(error) = result else {
+            panic!("LoLa uninit reserve should reject excessive alignment");
+        };
+
+        assert_eq!(error.get_code(), UCode::INVALID_ARGUMENT);
+    }
+
+    #[tokio::test]
+    async fn initialized_tx_exposes_initialized_payload_bytes() {
+        let transport = UTransportLola::build(config()).unwrap();
+        let topic = UUri::try_from_parts("vehicle", 0x4210, 1, 0x9010).unwrap();
+
+        let loan = transport
+            .reserve(
+                UFrameMetadata::publish(topic).with_encoding(RawBytes::encoding()),
+                4,
+                1,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(loan.payload(), &[0_u8; 4]);
+    }
+
+    #[tokio::test]
+    async fn stub_backend_rejects_stable_container_wrong_type_name_metadata() {
+        let transport = UTransportLola::build(config()).unwrap();
+        let topic = UUri::try_from_parts("vehicle", 0x4210, 1, 0x9007).unwrap();
+        let pose = VehiclePose { x: 21, y: 34 };
+        let encoding = zero_copy_conformance::stable_container_encoding_for::<VehiclePose>(
+            "example.vehicle.OtherPose",
+            "fixed",
+            mem::size_of::<VehiclePose>(),
+            mem::align_of::<VehiclePose>(),
+        );
+        let mut loan = transport
+            .reserve(
+                UFrameMetadata::publish(topic.clone()).with_encoding(encoding),
+                mem::size_of::<VehiclePose>(),
+                mem::align_of::<VehiclePose>(),
+            )
+            .await
+            .unwrap();
+        loan.payload_mut().copy_from_slice(bytes_of_pose(&pose));
+        transport.send_zero_copy(loan).await.unwrap();
+
+        let mut received = None;
+        for _ in 0..100 {
+            match transport.receive_zero_copy(&topic, None).await {
+                Ok(frame) => {
+                    received = Some(frame);
+                    break;
+                }
+                Err(status) if status.get_code() == UCode::NOT_FOUND => {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+                Err(status) => panic!("unexpected LoLa receive error: {status:?}"),
+            }
+        }
+        let received = received.expect("timed out waiting for malformed stable-container sample");
+        let error = zero_copy_conformance::borrow_loaned_payload_as::<
+            StableContainerPayload<VehiclePose>,
+            VehiclePose,
+        >(&received)
+        .unwrap_err();
+
+        assert!(matches!(
+            error,
+            UWireError::IncompatibleStablePayload { actual, .. } if actual.contains("OtherPose")
+        ));
     }
 
     #[tokio::test]
@@ -701,12 +938,14 @@ mod native_tests {
     use async_trait::async_trait;
     use tokio::sync::mpsc;
     use up_rust::{
-        payload::RawBytes,
+        payload::{RawBytes, StableContainerPayload},
+        test_util::zero_copy_conformance,
         zero_copy::{
             UContiguousZeroCopyRxFrame, UTxBuffer, UZeroCopyListener, UZeroCopyTransport,
             UZeroCopyTransportExt,
         },
-        UAttributes, UFrameBuilder, UFrameMetadata, UMessageType, UUri, UUID,
+        UAttributes, UFrameBuilder, UFrameMetadata, UMessageType, UUri,
+        UZeroCopyUninitTransportExt, UUID,
     };
 
     use super::*;
@@ -714,6 +953,16 @@ mod native_tests {
     static NATIVE_TEST_LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
 
     struct NativeListenerSender(mpsc::UnboundedSender<Vec<u8>>);
+
+    #[repr(C)]
+    #[derive(
+        Clone, Copy, Debug, Eq, PartialEq, up_rust::StablePayload, up_rust::ByteBackedStablePayload,
+    )]
+    #[stable_payload(type_name = "example.vehicle.VehiclePose")]
+    struct NativeVehiclePose {
+        x: u64,
+        y: u64,
+    }
 
     #[async_trait]
     impl UZeroCopyListener<LolaRxLease> for NativeListenerSender {
@@ -810,6 +1059,99 @@ mod native_tests {
 
         assert_eq!(received.metadata(), frame.metadata());
         assert_eq!(received.contiguous_payload(), frame.payload_bytes());
+    }
+
+    #[tokio::test]
+    #[ignore = "requires the native S-CORE LoLa runtime fixture"]
+    async fn native_round_trips_stable_container_uninit_payload() {
+        let _guard = native_test_guard().await;
+        let config = native_test_config();
+        let authority = config.local_authority.clone();
+        let transport = UTransportLola::build(config).unwrap();
+        let topic = UUri::try_from_parts(&authority, 0x4210, 1, 0x9008).unwrap();
+
+        transport
+            .send_uninit_loaned_payload_as::<
+                StableContainerPayload<NativeVehiclePose>,
+                NativeVehiclePose,
+            >(
+                UFrameMetadata::publish(topic.clone()),
+                |slot| Ok(slot.write(NativeVehiclePose { x: 144, y: 233 })),
+            )
+            .await
+            .unwrap();
+
+        let mut received = None;
+        for _ in 0..100 {
+            match transport.receive_zero_copy(&topic, None).await {
+                Ok(frame) => {
+                    received = Some(frame);
+                    break;
+                }
+                Err(status) if status.get_code() == UCode::NOT_FOUND => {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+                Err(status) if status.get_code() == UCode::INVALID_ARGUMENT => {
+                    eprintln!("discarding invalid LoLa native sample while waiting for stable test frame: {status:?}");
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+                Err(status) => panic!("unexpected LoLa receive error: {status:?}"),
+            }
+        }
+        let received = received.expect("timed out waiting for LoLa stable native sample");
+        let pose = zero_copy_conformance::borrow_loaned_payload_as::<
+            StableContainerPayload<NativeVehiclePose>,
+            NativeVehiclePose,
+        >(&received)
+        .unwrap();
+
+        assert_eq!(pose, &NativeVehiclePose { x: 144, y: 233 });
+    }
+
+    #[tokio::test]
+    #[ignore = "requires the native S-CORE LoLa runtime fixture"]
+    async fn native_tx_wrapper_pool_exhausts_and_reuses_after_drop() {
+        let _guard = native_test_guard().await;
+        let config = native_test_config();
+        let authority = config.local_authority.clone();
+        let max_samples = config.max_samples;
+        let transport = UTransportLola::build(config).unwrap();
+        let topic = UUri::try_from_parts(&authority, 0x4210, 1, 0x9009).unwrap();
+        let mut loans = Vec::new();
+        for _ in 0..max_samples {
+            loans.push(
+                transport
+                    .reserve(
+                        UFrameMetadata::publish(topic.clone()).with_encoding(RawBytes::encoding()),
+                        1,
+                        1,
+                    )
+                    .await
+                    .unwrap(),
+            );
+        }
+
+        let result = transport
+            .reserve(
+                UFrameMetadata::publish(topic.clone()).with_encoding(RawBytes::encoding()),
+                1,
+                1,
+            )
+            .await;
+        let Err(error) = result else {
+            panic!("LoLa native TX wrapper/sample pool should be exhausted");
+        };
+        assert_eq!(error.get_code(), UCode::RESOURCE_EXHAUSTED);
+
+        drop(loans.pop());
+        transport
+            .reserve(
+                UFrameMetadata::publish(topic).with_encoding(RawBytes::encoding()),
+                1,
+                1,
+            )
+            .await
+            .unwrap();
     }
 
     #[tokio::test]

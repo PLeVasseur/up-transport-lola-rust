@@ -4,10 +4,13 @@
  * SPDX-License-Identifier: Apache-2.0
  ********************************************************************************/
 
-use std::io::Cursor;
+use std::{io::Cursor, mem::MaybeUninit};
 
 use up_rust::{
-    zero_copy::{UContiguousZeroCopyRxFrame, UTxBuffer, UZeroCopyRxFrame},
+    zero_copy::{
+        LoanedPayload, LoanedPayloadUninitMut, PayloadLoanKind, UContiguousZeroCopyRxFrame,
+        ULoanedContiguousZeroCopyRxFrame, UTxBuffer, UUninitTxBuffer, UZeroCopyRxFrame,
+    },
     PayloadEncoding, UAttributes, UCode, UFrameMetadata, UMessageType, UPayloadFormat, UPriority,
     UStatus, UUri, UUID,
 };
@@ -36,9 +39,24 @@ pub struct LolaTxLoan {
     payload_len: usize,
 }
 
+/// LoLa transmit loan whose application payload bytes are intentionally uninitialized.
+pub struct LolaUninitTxLoan {
+    metadata: UFrameMetadata,
+    sample: LolaUninitTxStorage,
+    payload_offset: usize,
+    payload_len: usize,
+}
+
 enum LolaTxStorage {
     #[cfg(feature = "test-stub")]
     Vec(Vec<u8>),
+    #[cfg(feature = "lola-ffi")]
+    Native(NativeTxLoan),
+}
+
+enum LolaUninitTxStorage {
+    #[cfg(feature = "test-stub")]
+    Vec(Vec<MaybeUninit<u8>>),
     #[cfg(feature = "lola-ffi")]
     Native(NativeTxLoan),
 }
@@ -59,6 +77,17 @@ impl LolaTxStorage {
             Self::Vec(sample) => sample.as_mut_slice(),
             #[cfg(feature = "lola-ffi")]
             Self::Native(sample) => sample.as_mut_slice(),
+        }
+    }
+}
+
+impl LolaUninitTxStorage {
+    fn as_uninit_slice(&mut self) -> &mut [MaybeUninit<u8>] {
+        match self {
+            #[cfg(feature = "test-stub")]
+            Self::Vec(sample) => sample.as_mut_slice(),
+            #[cfg(feature = "lola-ffi")]
+            Self::Native(sample) => sample.as_uninit_slice(),
         }
     }
 }
@@ -89,7 +118,8 @@ impl LolaTxLoan {
         payload_len: usize,
         payload_alignment: usize,
     ) -> Result<Self, UStatus> {
-        sample.as_mut_slice().fill(0);
+        let sample_len = sample.len();
+        initialize_uninit_range(sample.as_uninit_slice(), 0, sample_len)?;
         let payload_offset = write_frame_header(
             &metadata,
             sample.as_mut_slice(),
@@ -125,6 +155,47 @@ impl LolaTxLoan {
     }
 }
 
+impl LolaUninitTxLoan {
+    #[cfg(feature = "test-stub")]
+    pub(crate) fn new_vec(
+        metadata: UFrameMetadata,
+        sample_size: usize,
+        payload_len: usize,
+        payload_alignment: usize,
+    ) -> Result<Self, UStatus> {
+        let mut sample = vec![MaybeUninit::uninit(); sample_size];
+        let payload_offset =
+            write_frame_header_uninit(&metadata, &mut sample, payload_len, payload_alignment)?;
+        Ok(Self {
+            metadata,
+            sample: LolaUninitTxStorage::Vec(sample),
+            payload_offset,
+            payload_len,
+        })
+    }
+
+    #[cfg(feature = "lola-ffi")]
+    pub(crate) fn new_native(
+        metadata: UFrameMetadata,
+        mut sample: NativeTxLoan,
+        payload_len: usize,
+        payload_alignment: usize,
+    ) -> Result<Self, UStatus> {
+        let payload_offset = write_frame_header_uninit(
+            &metadata,
+            sample.as_uninit_slice(),
+            payload_len,
+            payload_alignment,
+        )?;
+        Ok(Self {
+            metadata,
+            sample: LolaUninitTxStorage::Native(sample),
+            payload_offset,
+            payload_len,
+        })
+    }
+}
+
 impl UTxBuffer for LolaTxLoan {
     fn metadata(&self) -> &UFrameMetadata {
         &self.metadata
@@ -150,6 +221,52 @@ impl UTxBuffer for LolaTxLoan {
             .as_mut_slice()
             .get_mut(self.payload_offset..end)
             .expect("LoLa payload layout should be valid")
+    }
+}
+
+impl UUninitTxBuffer for LolaUninitTxLoan {
+    type Initialized = LolaTxLoan;
+
+    fn metadata(&self) -> &UFrameMetadata {
+        &self.metadata
+    }
+
+    fn payload_len(&self) -> usize {
+        self.payload_len
+    }
+
+    fn payload_uninit_mut(&mut self) -> LoanedPayloadUninitMut<'_> {
+        let end = self
+            .payload_offset
+            .checked_add(self.payload_len)
+            .expect("LoLa payload layout overflow");
+        let payload = self
+            .sample
+            .as_uninit_slice()
+            .get_mut(self.payload_offset..end)
+            .expect("LoLa payload layout should be valid");
+        unsafe { LoanedPayloadUninitMut::new_unchecked(payload, PayloadLoanKind::TransportLoan) }
+    }
+
+    unsafe fn assume_payload_init(self) -> Self::Initialized {
+        let sample = match self.sample {
+            #[cfg(feature = "test-stub")]
+            LolaUninitTxStorage::Vec(mut sample) => {
+                let len = sample.len();
+                let capacity = sample.capacity();
+                let ptr = sample.as_mut_ptr().cast::<u8>();
+                std::mem::forget(sample);
+                LolaTxStorage::Vec(unsafe { Vec::from_raw_parts(ptr, len, capacity) })
+            }
+            #[cfg(feature = "lola-ffi")]
+            LolaUninitTxStorage::Native(sample) => LolaTxStorage::Native(sample),
+        };
+        LolaTxLoan {
+            metadata: self.metadata,
+            sample,
+            payload_offset: self.payload_offset,
+            payload_len: self.payload_len,
+        }
     }
 }
 
@@ -251,6 +368,15 @@ impl UContiguousZeroCopyRxFrame for LolaRxLease {
     }
 }
 
+impl ULoanedContiguousZeroCopyRxFrame for LolaRxLease {
+    fn loaned_contiguous_payload(&self) -> Result<LoanedPayload<'_>, up_rust::payload::UWireError> {
+        let payload = self
+            .try_contiguous_payload()
+            .ok_or(up_rust::payload::UWireError::NotContiguous)?;
+        Ok(unsafe { LoanedPayload::new_unchecked(payload, PayloadLoanKind::TransportLoan) })
+    }
+}
+
 fn write_frame_header(
     metadata: &UFrameMetadata,
     sample: &mut [u8],
@@ -290,6 +416,91 @@ fn write_frame_header(
     let metadata_end = LOLA_FRAME_HEADER_LEN + metadata_bytes.len();
     sample[LOLA_FRAME_HEADER_LEN..metadata_end].copy_from_slice(&metadata_bytes);
     Ok(payload_offset)
+}
+
+fn write_frame_header_uninit(
+    metadata: &UFrameMetadata,
+    sample: &mut [MaybeUninit<u8>],
+    payload_len: usize,
+    payload_alignment: usize,
+) -> Result<usize, UStatus> {
+    let metadata_bytes = encode_metadata(metadata)?;
+    let metadata_len = u32::try_from(metadata_bytes.len()).map_err(|_| {
+        UStatus::fail_with_code(UCode::INVALID_ARGUMENT, "LoLa metadata is too large")
+    })?;
+    let payload_len_u32 = u32::try_from(payload_len).map_err(|_| {
+        UStatus::fail_with_code(UCode::INVALID_ARGUMENT, "LoLa payload is too large")
+    })?;
+    let payload_offset = frame_layout_bounds(
+        sample.len(),
+        metadata_bytes.len(),
+        payload_len,
+        payload_alignment,
+    )?
+    .0;
+    let payload_offset_u32 = u32::try_from(payload_offset).map_err(|_| {
+        UStatus::fail_with_code(UCode::INVALID_ARGUMENT, "LoLa payload offset is too large")
+    })?;
+    initialize_uninit_range(sample, 0, payload_offset)?;
+    let payload_end = payload_offset.checked_add(payload_len).ok_or_else(|| {
+        UStatus::fail_with_code(UCode::INVALID_ARGUMENT, "LoLa frame layout overflow")
+    })?;
+    initialize_uninit_range(sample, payload_end, sample.len())?;
+    let initialized = initialized_prefix_mut(sample, payload_offset)?;
+    initialized[0..4].copy_from_slice(LOLA_FRAME_MAGIC);
+    initialized[4] = LOLA_FRAME_VERSION;
+    initialized[8..12].copy_from_slice(&metadata_len.to_le_bytes());
+    initialized[12..16].copy_from_slice(&payload_len_u32.to_le_bytes());
+    initialized[16..20].copy_from_slice(&payload_offset_u32.to_le_bytes());
+    let metadata_end = LOLA_FRAME_HEADER_LEN + metadata_bytes.len();
+    initialized[LOLA_FRAME_HEADER_LEN..metadata_end].copy_from_slice(&metadata_bytes);
+    Ok(payload_offset)
+}
+
+fn frame_layout_bounds(
+    sample_len: usize,
+    metadata_len: usize,
+    payload_len: usize,
+    payload_alignment: usize,
+) -> Result<(usize, usize), UStatus> {
+    let payload_offset = payload_offset_for_len(metadata_len, payload_alignment)?;
+    let total_len = payload_offset.checked_add(payload_len).ok_or_else(|| {
+        UStatus::fail_with_code(UCode::INVALID_ARGUMENT, "LoLa frame layout overflow")
+    })?;
+    if total_len > sample_len {
+        return Err(UStatus::fail_with_code(
+            UCode::RESOURCE_EXHAUSTED,
+            format!("LoLa frame requires {total_len} bytes but sample has {sample_len} bytes"),
+        ));
+    }
+    Ok((payload_offset, total_len))
+}
+
+fn initialize_uninit_range(
+    sample: &mut [MaybeUninit<u8>],
+    start: usize,
+    end: usize,
+) -> Result<(), UStatus> {
+    let range = sample.get_mut(start..end).ok_or_else(|| {
+        UStatus::fail_with_code(
+            UCode::INVALID_ARGUMENT,
+            "LoLa initialization range is invalid",
+        )
+    })?;
+    for byte in range {
+        byte.write(0);
+    }
+    Ok(())
+}
+
+fn initialized_prefix_mut(
+    sample: &mut [MaybeUninit<u8>],
+    end: usize,
+) -> Result<&mut [u8], UStatus> {
+    let prefix = sample.get_mut(..end).ok_or_else(|| {
+        UStatus::fail_with_code(UCode::INVALID_ARGUMENT, "LoLa prefix range is invalid")
+    })?;
+    Ok(unsafe { std::slice::from_raw_parts_mut(prefix.as_mut_ptr().cast::<u8>(), prefix.len()) })
 }
 
 fn read_frame_header(sample: &[u8]) -> Result<(UFrameMetadata, usize, usize), UStatus> {
@@ -695,5 +906,32 @@ fn byte_to_priority(value: u8) -> Result<UPriority, UStatus> {
             UCode::INVALID_ARGUMENT,
             "invalid LoLa priority",
         )),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn uninit_frame_header_does_not_zero_application_payload_range() {
+        let topic = UUri::try_from_parts("vehicle", 0x4210, 1, 0x9008).unwrap();
+        let metadata = UFrameMetadata::publish(topic)
+            .with_encoding(PayloadEncoding::standard(UPayloadFormat::Raw));
+        let payload_len = 8;
+        let payload_alignment = 4;
+        let mut sample = vec![MaybeUninit::new(0xA5); 256];
+
+        let payload_offset =
+            write_frame_header_uninit(&metadata, &mut sample, payload_len, payload_alignment)
+                .unwrap();
+        let payload_end = payload_offset + payload_len;
+
+        for byte in sample
+            .get(payload_offset..payload_end)
+            .expect("payload range should be in bounds")
+        {
+            assert_eq!(unsafe { byte.assume_init() }, 0xA5);
+        }
     }
 }

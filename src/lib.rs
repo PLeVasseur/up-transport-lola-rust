@@ -48,5 +48,5 @@ mod transport;
 mod sys;
 
 pub use config::LolaTransportConfig;
-pub use frame::{LolaRxLease, LolaTxLoan};
+pub use frame::{LolaRxLease, LolaTxLoan, LolaUninitTxLoan};
 pub use transport::UTransportLola;

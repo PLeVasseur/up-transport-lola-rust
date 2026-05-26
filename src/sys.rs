@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  ********************************************************************************/
 
-use std::{ptr::NonNull, slice};
+use std::{mem::MaybeUninit, ptr::NonNull, slice};
 
 use up_rust::{UCode, UStatus};
 
@@ -218,6 +218,11 @@ impl NativeTxLoan {
             .expect("LoLa native TX loan should not be consumed twice")
     }
 
+    pub(crate) fn len(&self) -> usize {
+        let ptr = self.ptr.expect("LoLa TX loan is still owned");
+        unsafe { up_lola_tx_loan_size(ptr.as_ptr()) }
+    }
+
     pub(crate) fn as_slice(&self) -> &[u8] {
         let ptr = self.ptr.expect("LoLa TX loan is still owned");
         let data = unsafe { up_lola_tx_loan_data(ptr.as_ptr()) };
@@ -230,6 +235,13 @@ impl NativeTxLoan {
         let data = unsafe { up_lola_tx_loan_data(ptr.as_ptr()) };
         let len = unsafe { up_lola_tx_loan_size(ptr.as_ptr()) };
         unsafe { slice::from_raw_parts_mut(data, len) }
+    }
+
+    pub(crate) fn as_uninit_slice(&mut self) -> &mut [MaybeUninit<u8>] {
+        let ptr = self.ptr.expect("LoLa TX loan is still owned");
+        let data = unsafe { up_lola_tx_loan_data(ptr.as_ptr()) };
+        let len = unsafe { up_lola_tx_loan_size(ptr.as_ptr()) };
+        unsafe { slice::from_raw_parts_mut(data.cast::<MaybeUninit<u8>>(), len) }
     }
 }
 

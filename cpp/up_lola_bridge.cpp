@@ -13,8 +13,8 @@
 #include "score/mw/com/types.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cstdlib>
-#include <cstring>
 #include <fstream>
 #include <limits>
 #include <memory>
@@ -215,17 +215,148 @@ std::optional<std::string> write_default_logging_config()
 
 }  // namespace
 
+struct TxLoanPool;
+struct RxSamplePool;
+
 struct UpLolaTxLoan
 {
     SampleAllocateePtr<void> sample;
-    std::uint8_t* sample_data;
-    std::size_t sample_size;
+    std::uint8_t* sample_data{nullptr};
+    std::size_t sample_size{0U};
+    TxLoanPool* pool{nullptr};
+    std::size_t pool_index{0U};
+    bool in_use{false};
 };
 
 struct UpLolaRxSample
 {
     SamplePtr<void> sample;
-    std::size_t sample_size;
+    std::size_t sample_size{0U};
+    RxSamplePool* pool{nullptr};
+    std::size_t pool_index{0U};
+    bool in_use{false};
+};
+
+struct TxLoanPool
+{
+    explicit TxLoanPool(const std::size_t capacity) : slots(capacity)
+    {
+        for (std::size_t i = 0U; i < slots.size(); ++i)
+        {
+            slots[i].pool = this;
+            slots[i].pool_index = i;
+        }
+    }
+
+    void add_ref() noexcept
+    {
+        refs.fetch_add(1U, std::memory_order_relaxed);
+    }
+
+    void release_ref() noexcept
+    {
+        if (refs.fetch_sub(1U, std::memory_order_acq_rel) == 1U)
+        {
+            delete this;
+        }
+    }
+
+    UpLolaTxLoan* acquire()
+    {
+        std::lock_guard<std::mutex> lock{mutex};
+        for (auto& slot : slots)
+        {
+            if (!slot.in_use)
+            {
+                slot.in_use = true;
+                slot.sample_data = nullptr;
+                slot.sample_size = 0U;
+                add_ref();
+                return &slot;
+            }
+        }
+        return nullptr;
+    }
+
+    void release(UpLolaTxLoan* loan) noexcept
+    {
+        if (loan == nullptr || loan->pool != this)
+        {
+            return;
+        }
+        {
+            std::lock_guard<std::mutex> lock{mutex};
+            loan->sample = SampleAllocateePtr<void>{};
+            loan->sample_data = nullptr;
+            loan->sample_size = 0U;
+            loan->in_use = false;
+        }
+        release_ref();
+    }
+
+    std::mutex mutex;
+    std::atomic<std::size_t> refs{1U};
+    std::vector<UpLolaTxLoan> slots;
+};
+
+struct RxSamplePool
+{
+    explicit RxSamplePool(const std::size_t capacity) : slots(capacity)
+    {
+        for (std::size_t i = 0U; i < slots.size(); ++i)
+        {
+            slots[i].pool = this;
+            slots[i].pool_index = i;
+        }
+    }
+
+    void add_ref() noexcept
+    {
+        refs.fetch_add(1U, std::memory_order_relaxed);
+    }
+
+    void release_ref() noexcept
+    {
+        if (refs.fetch_sub(1U, std::memory_order_acq_rel) == 1U)
+        {
+            delete this;
+        }
+    }
+
+    UpLolaRxSample* acquire()
+    {
+        std::lock_guard<std::mutex> lock{mutex};
+        for (auto& slot : slots)
+        {
+            if (!slot.in_use)
+            {
+                slot.in_use = true;
+                slot.sample_size = 0U;
+                add_ref();
+                return &slot;
+            }
+        }
+        return nullptr;
+    }
+
+    void release(UpLolaRxSample* sample) noexcept
+    {
+        if (sample == nullptr || sample->pool != this)
+        {
+            return;
+        }
+        {
+            std::lock_guard<std::mutex> lock{mutex};
+            sample->sample = SamplePtr<void>{};
+            sample->sample_size = 0U;
+            sample->in_use = false;
+        }
+        release_ref();
+    }
+
+    std::mutex mutex;
+    std::atomic<std::size_t> refs{1U};
+    std::vector<UpLolaRxSample> slots;
 };
 
 struct UpLolaTransport
@@ -241,7 +372,21 @@ struct UpLolaTransport
     GenericSkeletonEvent* skeleton_event{nullptr};
     std::optional<GenericProxy> proxy;
     GenericProxyEvent* proxy_event{nullptr};
+    TxLoanPool* tx_pool{nullptr};
+    RxSamplePool* rx_pool{nullptr};
     bool subscribed{false};
+
+    ~UpLolaTransport()
+    {
+        if (tx_pool != nullptr)
+        {
+            tx_pool->release_ref();
+        }
+        if (rx_pool != nullptr)
+        {
+            rx_pool->release_ref();
+        }
+    }
 
     UpLolaStatusCode ensure_proxy_locked()
     {
@@ -305,7 +450,16 @@ struct UpLolaSubscriber
     std::mutex mutex;
     std::optional<GenericProxy> proxy;
     GenericProxyEvent* proxy_event{nullptr};
+    RxSamplePool* rx_pool{nullptr};
     bool subscribed{false};
+
+    ~UpLolaSubscriber()
+    {
+        if (rx_pool != nullptr)
+        {
+            rx_pool->release_ref();
+        }
+    }
 
     UpLolaStatusCode ensure_proxy_locked()
     {
@@ -398,6 +552,8 @@ UpLolaStatusCode up_lola_transport_create(const UpLolaConfig* config, UpLolaTran
     transport->sample_size = config->sample_size;
     transport->sample_alignment = config->sample_alignment;
     transport->max_samples = config->max_samples;
+    transport->tx_pool = new TxLoanPool{config->max_samples};
+    transport->rx_pool = new RxSamplePool{config->max_samples};
 
     const DataTypeMetaInfo data_type_meta_info{config->sample_size, config->sample_alignment};
     const std::vector<EventInfo> events{{transport->event_name, data_type_meta_info}};
@@ -455,23 +611,28 @@ UpLolaStatusCode up_lola_transport_reserve(UpLolaTransport* transport, UpLolaTxL
     *out_loan = nullptr;
     std::lock_guard<std::mutex> lock{transport->mutex};
 
-    auto sample_result = transport->skeleton_event->Allocate();
-    if (!sample_result.has_value())
+    auto* loan = transport->tx_pool == nullptr ? nullptr : transport->tx_pool->acquire();
+    if (loan == nullptr)
     {
         return UP_LOLA_STATUS_RESOURCE_EXHAUSTED;
     }
 
-    auto loan = std::make_unique<UpLolaTxLoan>();
+    auto sample_result = transport->skeleton_event->Allocate();
+    if (!sample_result.has_value())
+    {
+        loan->pool->release(loan);
+        return UP_LOLA_STATUS_RESOURCE_EXHAUSTED;
+    }
+
     loan->sample = std::move(sample_result).value();
     loan->sample_size = transport->sample_size;
     loan->sample_data = generic_sample_data(loan->sample, transport->sample_size, transport->sample_alignment);
-    auto* data = loan->sample_data;
-    if (data == nullptr)
+    if (loan->sample_data == nullptr)
     {
+        loan->pool->release(loan);
         return UP_LOLA_STATUS_INTERNAL;
     }
-    std::memset(data, 0, loan->sample_size);
-    *out_loan = loan.release();
+    *out_loan = loan;
     return UP_LOLA_STATUS_OK;
 }
 
@@ -491,7 +652,10 @@ std::size_t up_lola_tx_loan_size(const UpLolaTxLoan* loan)
 
 void up_lola_tx_loan_destroy(UpLolaTxLoan* loan)
 {
-    delete loan;
+    if (loan != nullptr && loan->pool != nullptr)
+    {
+        loan->pool->release(loan);
+    }
 }
 
 UpLolaStatusCode up_lola_transport_send(UpLolaTransport* transport, UpLolaTxLoan* loan)
@@ -500,9 +664,9 @@ UpLolaStatusCode up_lola_transport_send(UpLolaTransport* transport, UpLolaTxLoan
     {
         return UP_LOLA_STATUS_INVALID_ARGUMENT;
     }
-    std::unique_ptr<UpLolaTxLoan> owned_loan{loan};
     std::lock_guard<std::mutex> lock{transport->mutex};
-    auto send_result = transport->skeleton_event->Send(std::move(owned_loan->sample));
+    auto send_result = transport->skeleton_event->Send(std::move(loan->sample));
+    loan->pool->release(loan);
     if (!send_result.has_value())
     {
         return UP_LOLA_STATUS_INTERNAL;
@@ -543,10 +707,14 @@ UpLolaStatusCode up_lola_transport_receive(UpLolaTransport* transport, UpLolaRxS
         return UP_LOLA_STATUS_NOT_FOUND;
     }
 
-    auto sample = std::make_unique<UpLolaRxSample>();
+    auto* sample = transport->rx_pool == nullptr ? nullptr : transport->rx_pool->acquire();
+    if (sample == nullptr)
+    {
+        return UP_LOLA_STATUS_RESOURCE_EXHAUSTED;
+    }
     sample->sample = std::move(received_sample);
     sample->sample_size = transport->sample_size;
-    *out_sample = sample.release();
+    *out_sample = sample;
     return UP_LOLA_STATUS_OK;
 }
 
@@ -578,6 +746,7 @@ UpLolaStatusCode up_lola_subscriber_create(const UpLolaConfig* config, UpLolaSub
     subscriber->event_name = std::move(*event_name);
     subscriber->sample_size = config->sample_size;
     subscriber->max_samples = config->max_samples;
+    subscriber->rx_pool = new RxSamplePool{config->max_samples};
 
     {
         std::lock_guard<std::mutex> lock{subscriber->mutex};
@@ -638,10 +807,14 @@ UpLolaStatusCode up_lola_subscriber_receive(UpLolaSubscriber* subscriber, UpLola
         return UP_LOLA_STATUS_NOT_FOUND;
     }
 
-    auto sample = std::make_unique<UpLolaRxSample>();
+    auto* sample = subscriber->rx_pool == nullptr ? nullptr : subscriber->rx_pool->acquire();
+    if (sample == nullptr)
+    {
+        return UP_LOLA_STATUS_RESOURCE_EXHAUSTED;
+    }
     sample->sample = std::move(received_sample);
     sample->sample_size = subscriber->sample_size;
-    *out_sample = sample.release();
+    *out_sample = sample;
     return UP_LOLA_STATUS_OK;
 }
 
@@ -661,5 +834,8 @@ std::size_t up_lola_rx_sample_size(const UpLolaRxSample* sample)
 
 void up_lola_rx_sample_destroy(UpLolaRxSample* sample)
 {
-    delete sample;
+    if (sample != nullptr && sample->pool != nullptr)
+    {
+        sample->pool->release(sample);
+    }
 }
