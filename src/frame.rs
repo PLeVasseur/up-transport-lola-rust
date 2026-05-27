@@ -245,6 +245,17 @@ impl UUninitTxBuffer for LolaUninitTxLoan {
             .as_uninit_slice()
             .get_mut(self.payload_offset..end)
             .expect("LoLa payload layout should be valid");
+        // SAFETY:
+        // - The range was checked against the sample above and is the exact
+        //   visible application payload range computed when the loan was
+        //   reserved.
+        // - `&mut self` gives exclusive access to the sample while the loaned
+        //   payload view exists.
+        // - Per https://doc.rust-lang.org/stable/std/slice/fn.from_raw_parts_mut.html#safety,
+        //   the backing slice must be "valid for both reads and writes for
+        //   `len * size_of::<T>()` many bytes" and "must not be accessed
+        //   through any other pointer" for the returned lifetime; the mutable
+        //   sample borrow provides that exclusivity.
         unsafe { LoanedPayloadUninitMut::new_unchecked(payload, PayloadLoanKind::TransportLoan) }
     }
 
@@ -256,6 +267,25 @@ impl UUninitTxBuffer for LolaUninitTxLoan {
                 let capacity = sample.capacity();
                 let ptr = sample.as_mut_ptr().cast::<u8>();
                 std::mem::forget(sample);
+                // SAFETY:
+                // - `MaybeUninit<u8>` has the same size, alignment, and ABI as
+                //   `u8` per
+                //   https://doc.rust-lang.org/stable/std/mem/union.MaybeUninit.html#layout-1:
+                //
+                //   "`MaybeUninit<T>` is guaranteed to have the same size,
+                //   alignment, and ABI as `T`."
+                //
+                // - The caller of `assume_payload_init` guarantees the visible
+                //   payload bytes are initialized; `write_frame_header_uninit`
+                //   initialized the header, metadata, alignment padding, and
+                //   fixed-sample tail bytes before the loan was exposed.
+                // - `ptr`, `len`, and `capacity` come from the original Vec
+                //   allocation, and `sample` was forgotten so the allocation has
+                //   exactly one owner after `Vec::from_raw_parts`.
+                // - Per https://doc.rust-lang.org/stable/std/vec/struct.Vec.html#method.from_raw_parts,
+                //   "The first `length` values must be properly initialized
+                //   values of type `T`" and "The ownership of `ptr` is
+                //   effectively transferred to the `Vec<T>`."
                 LolaTxStorage::Vec(unsafe { Vec::from_raw_parts(ptr, len, capacity) })
             }
             #[cfg(feature = "lola-ffi")]
@@ -373,6 +403,15 @@ impl ULoanedContiguousZeroCopyRxFrame for LolaRxLease {
         let payload = self
             .try_contiguous_payload()
             .ok_or(up_rust::payload::UWireError::NotContiguous)?;
+        // SAFETY:
+        // - `payload` is a borrowed range inside this receive lease's LoLa
+        //   sample, so it remains valid for the lifetime of `&self`.
+        // - The range excludes the hidden frame header, metadata, and padding;
+        //   no allocation or coalescing is performed to produce it.
+        // - Per https://doc.rust-lang.org/stable/std/slice/fn.from_raw_parts.html#safety,
+        //   a borrowed slice's data must be "valid for reads" and "contained
+        //   within a single allocation"; `try_contiguous_payload` returns a
+        //   subslice from the sample allocation.
         Ok(unsafe { LoanedPayload::new_unchecked(payload, PayloadLoanKind::TransportLoan) })
     }
 }
@@ -390,7 +429,11 @@ fn write_frame_header(
     let payload_len_u32 = u32::try_from(payload_len).map_err(|_| {
         UStatus::fail_with_code(UCode::INVALID_ARGUMENT, "LoLa payload is too large")
     })?;
-    let payload_offset = payload_offset_for_len(metadata_bytes.len(), payload_alignment)?;
+    let payload_offset = payload_offset_for_len(
+        metadata_bytes.len(),
+        payload_alignment,
+        sample.as_ptr() as usize,
+    )?;
     let payload_offset_u32 = u32::try_from(payload_offset).map_err(|_| {
         UStatus::fail_with_code(UCode::INVALID_ARGUMENT, "LoLa payload offset is too large")
     })?;
@@ -436,6 +479,7 @@ fn write_frame_header_uninit(
         metadata_bytes.len(),
         payload_len,
         payload_alignment,
+        sample.as_ptr() as usize,
     )?
     .0;
     let payload_offset_u32 = u32::try_from(payload_offset).map_err(|_| {
@@ -462,8 +506,9 @@ fn frame_layout_bounds(
     metadata_len: usize,
     payload_len: usize,
     payload_alignment: usize,
+    sample_address: usize,
 ) -> Result<(usize, usize), UStatus> {
-    let payload_offset = payload_offset_for_len(metadata_len, payload_alignment)?;
+    let payload_offset = payload_offset_for_len(metadata_len, payload_alignment, sample_address)?;
     let total_len = payload_offset.checked_add(payload_len).ok_or_else(|| {
         UStatus::fail_with_code(UCode::INVALID_ARGUMENT, "LoLa frame layout overflow")
     })?;
@@ -500,6 +545,20 @@ fn initialized_prefix_mut(
     let prefix = sample.get_mut(..end).ok_or_else(|| {
         UStatus::fail_with_code(UCode::INVALID_ARGUMENT, "LoLa prefix range is invalid")
     })?;
+    // SAFETY:
+    // - `prefix` is in bounds and comes from one mutable slice allocation.
+    // - Callers only request prefixes after `initialize_uninit_range` wrote
+    //   every byte in `..end`.
+    // - Per https://doc.rust-lang.org/stable/std/mem/union.MaybeUninit.html#layout-1:
+    //
+    //   "`MaybeUninit<T>` is guaranteed to have the same size, alignment, and
+    //   ABI as `T`."
+    //
+    // - Per https://doc.rust-lang.org/stable/std/slice/fn.from_raw_parts_mut.html#safety:
+    //
+    //   "`data` must point to `len` consecutive properly initialized values of
+    //   type `T`" and "The memory referenced by the returned slice must not be
+    //   accessed through any other pointer" for the returned lifetime.
     Ok(unsafe { std::slice::from_raw_parts_mut(prefix.as_mut_ptr().cast::<u8>(), prefix.len()) })
 }
 
@@ -559,13 +618,23 @@ fn read_frame_header(sample: &[u8]) -> Result<(UFrameMetadata, usize, usize), US
     Ok((metadata, payload_offset, payload_len))
 }
 
-fn payload_offset_for_len(metadata_len: usize, payload_alignment: usize) -> Result<usize, UStatus> {
+fn payload_offset_for_len(
+    metadata_len: usize,
+    payload_alignment: usize,
+    sample_address: usize,
+) -> Result<usize, UStatus> {
     let metadata_end = LOLA_FRAME_HEADER_LEN
         .checked_add(metadata_len)
         .ok_or_else(|| {
             UStatus::fail_with_code(UCode::INVALID_ARGUMENT, "LoLa metadata layout overflow")
         })?;
-    align_up(metadata_end, payload_alignment)
+    let absolute_metadata_end = sample_address.checked_add(metadata_end).ok_or_else(|| {
+        UStatus::fail_with_code(UCode::INVALID_ARGUMENT, "LoLa metadata layout overflow")
+    })?;
+    let absolute_payload = align_up(absolute_metadata_end, payload_alignment)?;
+    absolute_payload.checked_sub(sample_address).ok_or_else(|| {
+        UStatus::fail_with_code(UCode::INVALID_ARGUMENT, "LoLa payload layout overflow")
+    })
 }
 
 fn align_up(value: usize, alignment: usize) -> Result<usize, UStatus> {
@@ -932,6 +1001,35 @@ mod tests {
             .expect("payload range should be in bounds")
         {
             assert_eq!(unsafe { byte.assume_init() }, 0xA5);
+        }
+    }
+
+    #[cfg(feature = "test-stub")]
+    #[test]
+    fn test_stub_uninit_tx_loan_commits_after_exact_payload_initialization() {
+        let topic = UUri::try_from_parts("vehicle", 0x4210, 1, 0x9009).unwrap();
+        let metadata = UFrameMetadata::publish(topic)
+            .with_encoding(PayloadEncoding::standard(UPayloadFormat::Raw));
+        let mut loan = LolaUninitTxLoan::new_vec(metadata, 256, 3, 4).unwrap();
+
+        {
+            let mut writer = loan.payload_uninit_mut().into_writer();
+            writer.write_all(b"xyz").unwrap();
+            let _initialized = writer.finish().unwrap();
+        }
+
+        // SAFETY: The byte writer successfully initialized exactly the full
+        // visible payload range before the uninit loan is committed.
+        let loan = unsafe { loan.assume_payload_init() };
+
+        assert_eq!(loan.payload(), b"xyz");
+        match &loan.sample {
+            LolaTxStorage::Vec(sample) => {
+                assert_eq!(&sample[0..4], LOLA_FRAME_MAGIC);
+                assert_eq!(sample[4], LOLA_FRAME_VERSION);
+            }
+            #[cfg(feature = "lola-ffi")]
+            LolaTxStorage::Native(_) => unreachable!("test-stub test uses Vec storage"),
         }
     }
 }

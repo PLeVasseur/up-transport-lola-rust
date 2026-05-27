@@ -153,6 +153,17 @@ Run only the fake unit-test backend:
 cargo test --no-default-features --features test-stub
 ```
 
+Run the Miri-feasible fake backend checks for uninitialized frame conversion and
+header handling:
+
+```sh
+scripts/run-miri-test-stub.sh
+```
+
+The runner disables Miri isolation because the tests construct
+`UFrameMetadata::publish`, which builds a UUID from `SystemTime::elapsed`; Miri
+rejects the underlying `clock_gettime` call when isolation is enabled.
+
 ## Native Bridge
 
 The production bridge uses LoLa generic APIs:
