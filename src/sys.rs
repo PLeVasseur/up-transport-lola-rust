@@ -91,7 +91,7 @@ pub struct UpLolaRxSample {
     _private: [u8; 0],
 }
 
-extern "C" {
+unsafe extern "C" {
     fn up_lola_transport_create(
         config: *const UpLolaConfig,
         out_transport: *mut *mut UpLolaTransport,

@@ -2,6 +2,7 @@
 name = "up-transport-lola-rust"
 version = "0.2.0"
 edition = "2021"
+rust-version = "1.88"
 description = "Eclipse S-CORE LoLa zero-copy transport for Eclipse uProtocol"
 keywords = ["uProtocol", "LoLa", "S-CORE", "zero-copy", "shared-memory"]
 license = "Apache-2.0"
@@ -19,14 +20,14 @@ test-stub = []
 [dependencies]
 async-trait = "0.1"
 tokio = { version = "1.45.1", default-features = false, features = ["rt", "sync", "time"] }
-up-rust = { path = "/home/pete.levasseur/eclipse/uprotocol/up-rust" }
+up-rust = { git = "https://github.com/PLeVasseur/up-rust.git", rev = "6db506f0deff5de4f1093d1378d7dd40d3bb9f5d" }
 
 [build-dependencies]
 
 [dev-dependencies]
 protobuf = { version = "3.7.2", features = ["with-bytes"] }
 tokio = { version = "1.45.1", default-features = false, features = ["macros", "rt"] }
-up-rust = { path = "/home/pete.levasseur/eclipse/uprotocol/up-rust", features = ["protobuf-wire", "test-util"] }
+up-rust = { git = "https://github.com/PLeVasseur/up-rust.git", rev = "6db506f0deff5de4f1093d1378d7dd40d3bb9f5d", features = ["protobuf-wire", "test-util"] }
 
 [package.metadata.docs.rs]
 no-default-features = true
@@ -35,3 +36,20 @@ rustdoc-args = ["--cfg", "docsrs"]
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(docsrs)'] }
+unsafe_op_in_unsafe_fn = "deny"
+missing_unsafe_on_extern = "deny"
+unsafe_attr_outside_unsafe = "deny"
+unused_unsafe = "deny"
+
+[lints.clippy]
+missing_safety_doc = "deny"
+undocumented_unsafe_blocks = "deny"
+multiple_unsafe_ops_per_block = "deny"
+unnecessary_safety_comment = "deny"
+unnecessary_safety_doc = "deny"
+borrow_as_ptr = "deny"
+ptr_as_ptr = "deny"
+as_ptr_cast_mut = "deny"
+not_unsafe_ptr_arg_deref = "deny"
+transmute_ptr_to_ptr = "deny"
+transmute_ptr_to_ref = "deny"

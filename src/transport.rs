@@ -467,6 +467,9 @@ mod tests {
     }
 
     fn bytes_of_pose(pose: &VehiclePose) -> &[u8] {
+        // SAFETY: `pose` is a valid shared reference to `VehiclePose`, and the
+        // returned slice covers exactly `size_of::<VehiclePose>()` bytes for the
+        // lifetime of that reference.
         unsafe {
             std::slice::from_raw_parts(
                 (pose as *const VehiclePose).cast::<u8>(),

@@ -1000,6 +1000,8 @@ mod tests {
             .get(payload_offset..payload_end)
             .expect("payload range should be in bounds")
         {
+            // SAFETY: `sample` was constructed with `MaybeUninit::new(0xA5)`,
+            // so every element in the checked payload range is initialized.
             assert_eq!(unsafe { byte.assume_init() }, 0xA5);
         }
     }
