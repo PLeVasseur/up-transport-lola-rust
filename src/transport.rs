@@ -442,8 +442,8 @@ mod tests {
             UContiguousZeroCopyRxFrame, UTxBuffer, UZeroCopyListener, UZeroCopyTransport,
             UZeroCopyTransportExt,
         },
-        ProtobufPayload, UAttributes, UCode, UFrameBuilder, UFrameMetadata, UMessageType, UUri,
-        UZeroCopyUninitTransportExt, UUID,
+        PayloadEncoding, ProtobufPayload, UAttributes, UCode, UFrameBuilder, UFrameMetadata,
+        UMessageType, UUri, UZeroCopyUninitTransportExt, UUID,
     };
 
     use super::*;
@@ -478,6 +478,19 @@ mod tests {
         }
     }
 
+    fn deterministic_message_id() -> UUID {
+        UUID::from_u64_pair(0x0000_0000_0001_7000, 0x8010_1010_1010_1a1a)
+            .expect("fixed UUID should be valid")
+    }
+
+    fn deterministic_publish_metadata(topic: UUri) -> UFrameMetadata {
+        let id = deterministic_message_id();
+        UFrameMetadata::new(
+            UAttributes::new(id, topic, None, UMessageType::Publish),
+            None::<PayloadEncoding>,
+        )
+    }
+
     struct ListenerSender(mpsc::UnboundedSender<(UFrameMetadata, Vec<u8>)>);
 
     #[async_trait]
@@ -510,6 +523,7 @@ mod tests {
         let transport = UTransportLola::build(config()).unwrap();
         let topic = UUri::try_from_parts("vehicle", 0x4210, 1, 0x9000).unwrap();
         let frame = UFrameBuilder::publish(topic.clone())
+            .with_message_id(deterministic_message_id())
             .build_with_raw_payload(b"payload".as_slice())
             .unwrap();
         let mut loan = transport
@@ -547,7 +561,7 @@ mod tests {
 
         transport
             .send_serialized_zero_copy::<ProtobufPayload, _>(
-                UFrameMetadata::publish(topic.clone()),
+                deterministic_publish_metadata(topic.clone()),
                 &payload,
             )
             .await
@@ -585,7 +599,7 @@ mod tests {
 
         transport
             .send_loaned_payload_as::<StableContainerPayload<VehiclePose>, VehiclePose>(
-                UFrameMetadata::publish(topic.clone()),
+                deterministic_publish_metadata(topic.clone()),
                 |payload| {
                     payload.x = 21;
                     payload.y = 34;
@@ -638,7 +652,7 @@ mod tests {
 
         transport
             .send_uninit_loaned_payload_as::<StableContainerPayload<VehiclePose>, VehiclePose>(
-                UFrameMetadata::publish(topic.clone()),
+                deterministic_publish_metadata(topic.clone()),
                 |slot| Ok(slot.write(VehiclePose { x: 55, y: 89 })),
             )
             .await
@@ -673,7 +687,7 @@ mod tests {
         let topic = UUri::try_from_parts("vehicle", 0x4210, 1, 0x9009).unwrap();
 
         let result = transport
-            .reserve_uninit(UFrameMetadata::publish(topic), 8, 16)
+            .reserve_uninit(deterministic_publish_metadata(topic), 8, 16)
             .await;
         let Err(error) = result else {
             panic!("LoLa uninit reserve should reject excessive alignment");
@@ -689,7 +703,7 @@ mod tests {
 
         let loan = transport
             .reserve(
-                UFrameMetadata::publish(topic).with_encoding(RawBytes::encoding()),
+                deterministic_publish_metadata(topic).with_encoding(RawBytes::encoding()),
                 4,
                 1,
             )
@@ -712,7 +726,7 @@ mod tests {
         );
         let mut loan = transport
             .reserve(
-                UFrameMetadata::publish(topic.clone()).with_encoding(encoding),
+                deterministic_publish_metadata(topic.clone()).with_encoding(encoding),
                 mem::size_of::<VehiclePose>(),
                 mem::align_of::<VehiclePose>(),
             )
@@ -754,7 +768,7 @@ mod tests {
 
         transport
             .send_serialized_zero_copy::<RawBytes, _>(
-                UFrameMetadata::publish(topic.clone()),
+                deterministic_publish_metadata(topic.clone()),
                 &&[0x0a_u8][..],
             )
             .await
@@ -788,6 +802,7 @@ mod tests {
         let transport = UTransportLola::build(config()).unwrap();
         let topic = UUri::try_from_parts("vehicle", 0x4210, 1, 0x9000).unwrap();
         let frame = UFrameBuilder::publish(topic.clone())
+            .with_message_id(deterministic_message_id())
             .build_with_raw_payload(b"payload".as_slice())
             .unwrap();
         let (sender, mut receiver) = mpsc::unbounded_channel();
@@ -824,6 +839,7 @@ mod tests {
         let topic = UUri::try_from_parts("vehicle", 0x4210, 1, 0x9000).unwrap();
         let broad_topic = UUri::any_with_resource_id(topic.resource_id_raw());
         let frame = UFrameBuilder::publish(topic.clone())
+            .with_message_id(deterministic_message_id())
             .build_with_raw_payload(b"payload".as_slice())
             .unwrap();
         let (sender_a, mut receiver_a) = mpsc::unbounded_channel();
@@ -894,7 +910,7 @@ mod tests {
             .unwrap();
 
         let attributes = UAttributes::new(
-            UUID::build(),
+            deterministic_message_id(),
             source.clone(),
             Some(sink.clone()),
             UMessageType::Notification,

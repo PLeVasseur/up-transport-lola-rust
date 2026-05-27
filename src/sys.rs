@@ -91,6 +91,13 @@ pub struct UpLolaRxSample {
     _private: [u8; 0],
 }
 
+// SAFETY:
+// - These declarations must exactly match the native LoLa bridge ABI for opaque
+//   handles, pointer mutability, and out-parameter ownership transfer.
+// - Rust wrappers check null out-parameters before constructing `NonNull` and
+//   tie borrowed slices to `NativeTxLoan`/`NativeRxSample` wrapper lifetimes.
+// - Thread-safety, allocation validity, and sample lifetime are external native
+//   bridge contracts; Miri cannot execute or prove these FFI calls.
 unsafe extern "C" {
     fn up_lola_transport_create(
         config: *const UpLolaConfig,
@@ -130,12 +137,14 @@ pub(crate) struct NativeTransport {
     ptr: NonNull<UpLolaTransport>,
 }
 
-// SAFETY: The native bridge treats `UpLolaTransport` handles as thread-safe
-// transport objects. Rust only stores and forwards the opaque non-null handle;
-// all synchronization requirements are part of the bridge contract.
+// SAFETY: The native bridge contract treats `UpLolaTransport` handles as
+// thread-safe transport objects. Rust only stores and forwards the opaque
+// non-null handle; synchronization and callback/thread affinity are external
+// native obligations, not Rust-level guarantees proven by this crate.
 unsafe impl Send for NativeTransport {}
-// SAFETY: Shared references to `NativeTransport` only call bridge functions
-// that accept the opaque handle and perform their own synchronization.
+// SAFETY: Shared references to `NativeTransport` only call bridge functions that
+// accept the opaque handle and perform their own synchronization per the native
+// bridge contract.
 unsafe impl Sync for NativeTransport {}
 
 impl NativeTransport {

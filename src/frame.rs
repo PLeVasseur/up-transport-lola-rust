@@ -260,6 +260,16 @@ impl UUninitTxBuffer for LolaUninitTxLoan {
     }
 
     unsafe fn assume_payload_init(self) -> Self::Initialized {
+        // SAFETY CONTRACT:
+        // - The caller of `UUninitTxBuffer::assume_payload_init` guarantees the
+        //   visible application payload range returned by `payload_uninit_mut`
+        //   was fully initialized before conversion.
+        // - `write_frame_header_uninit` initialized the LoLa header, serialized
+        //   metadata, alignment padding, and fixed-sample tail before exposing
+        //   the uninitialized application payload range.
+        // - Native mode transfers the same external LoLa sample handle into the
+        //   initialized type-state; test-stub mode uses the `Vec::from_raw_parts`
+        //   proof below to preserve allocation ownership.
         let sample = match self.sample {
             #[cfg(feature = "test-stub")]
             LolaUninitTxStorage::Vec(mut sample) => {
@@ -979,13 +989,23 @@ fn byte_to_priority(value: u8) -> Result<UPriority, UStatus> {
 }
 
 #[cfg(test)]
+fn deterministic_publish_metadata(topic: UUri) -> UFrameMetadata {
+    let id = UUID::from_u64_pair(0x0000_0000_0001_7000, 0x8010_1010_1010_1a1a)
+        .expect("fixed UUID should be valid");
+    UFrameMetadata::new(
+        UAttributes::new(id, topic, None, UMessageType::Publish),
+        None::<PayloadEncoding>,
+    )
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn uninit_frame_header_does_not_zero_application_payload_range() {
         let topic = UUri::try_from_parts("vehicle", 0x4210, 1, 0x9008).unwrap();
-        let metadata = UFrameMetadata::publish(topic)
+        let metadata = deterministic_publish_metadata(topic)
             .with_encoding(PayloadEncoding::standard(UPayloadFormat::Raw));
         let payload_len = 8;
         let payload_alignment = 4;
@@ -1010,7 +1030,7 @@ mod tests {
     #[test]
     fn test_stub_uninit_tx_loan_commits_after_exact_payload_initialization() {
         let topic = UUri::try_from_parts("vehicle", 0x4210, 1, 0x9009).unwrap();
-        let metadata = UFrameMetadata::publish(topic)
+        let metadata = deterministic_publish_metadata(topic)
             .with_encoding(PayloadEncoding::standard(UPayloadFormat::Raw));
         let mut loan = LolaUninitTxLoan::new_vec(metadata, 256, 3, 4).unwrap();
 
