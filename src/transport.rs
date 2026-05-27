@@ -4,7 +4,6 @@
  * SPDX-License-Identifier: Apache-2.0
  ********************************************************************************/
 
-#[cfg(feature = "test-stub")]
 use std::collections::VecDeque;
 use std::{
     sync::{Arc, Weak},
@@ -47,6 +46,7 @@ pub struct UTransportLola {
     listener_task: Mutex<Option<JoinHandle<()>>>,
     #[cfg(feature = "test-stub")]
     pending: Mutex<VecDeque<Vec<u8>>>,
+    pull_pending: Mutex<VecDeque<LolaRxLease>>,
     #[cfg(feature = "lola-ffi")]
     native: NativeTransport,
     #[cfg(feature = "lola-ffi")]
@@ -71,6 +71,7 @@ impl UTransportLola {
             listener_task: Mutex::new(None),
             #[cfg(feature = "test-stub")]
             pending: Mutex::new(VecDeque::new()),
+            pull_pending: Mutex::new(VecDeque::new()),
             #[cfg(feature = "lola-ffi")]
             native,
             #[cfg(feature = "lola-ffi")]
@@ -187,6 +188,22 @@ impl UTransportLola {
             Ok(deliveries)
         }
     }
+
+    async fn pop_queued_pull_sample(
+        &self,
+        source_filter: &UUri,
+        sink_filter: Option<&UUri>,
+    ) -> Option<LolaRxLease> {
+        let mut pending = self.pull_pending.lock().await;
+        let index = pending
+            .iter()
+            .position(|frame| frame_matches(frame, source_filter, sink_filter))?;
+        pending.remove(index)
+    }
+
+    async fn queue_pull_sample(&self, frame: LolaRxLease) {
+        self.pull_pending.lock().await.push_back(frame);
+    }
 }
 
 struct ListenerRegistration {
@@ -291,6 +308,12 @@ impl UZeroCopyTransport for UTransportLola {
         sink_filter: Option<&UUri>,
     ) -> Result<Self::Rx, UStatus> {
         verify_filter_criteria(source_filter, sink_filter)?;
+        if let Some(frame) = self
+            .pop_queued_pull_sample(source_filter, sink_filter)
+            .await
+        {
+            return Ok(frame);
+        }
         #[cfg(feature = "test-stub")]
         {
             let mut pending = self.pending.lock().await;
@@ -299,6 +322,9 @@ impl UZeroCopyTransport for UTransportLola {
                 if frame_matches(&frame, source_filter, sink_filter) {
                     return Ok(frame);
                 }
+                drop(pending);
+                self.queue_pull_sample(frame).await;
+                pending = self.pending.lock().await;
             }
             Err(UStatus::fail_with_code(
                 UCode::NOT_FOUND,
@@ -311,6 +337,7 @@ impl UZeroCopyTransport for UTransportLola {
             if frame_matches(&sample, source_filter, sink_filter) {
                 return Ok(sample);
             }
+            self.queue_pull_sample(sample).await;
         }
     }
 
@@ -795,6 +822,34 @@ mod tests {
             result,
             Err(UWireError::UnsupportedEncoding { .. })
         ));
+    }
+
+    #[tokio::test]
+    async fn pull_receive_preserves_nonmatching_stub_samples() {
+        let transport = UTransportLola::build(config()).unwrap();
+        let topic_a = UUri::try_from_parts("vehicle", 0x4210, 1, 0x9011).unwrap();
+        let topic_b = UUri::try_from_parts("vehicle", 0x4210, 1, 0x9012).unwrap();
+
+        transport
+            .send_serialized_zero_copy::<RawBytes, _>(
+                deterministic_publish_metadata(topic_a.clone()),
+                &&b"topic-a"[..],
+            )
+            .await
+            .unwrap();
+        transport
+            .send_serialized_zero_copy::<RawBytes, _>(
+                deterministic_publish_metadata(topic_b.clone()),
+                &&b"topic-b"[..],
+            )
+            .await
+            .unwrap();
+
+        let received_b = transport.receive_zero_copy(&topic_b, None).await.unwrap();
+        assert_eq!(received_b.contiguous_payload(), b"topic-b");
+
+        let received_a = transport.receive_zero_copy(&topic_a, None).await.unwrap();
+        assert_eq!(received_a.contiguous_payload(), b"topic-a");
     }
 
     #[tokio::test]
