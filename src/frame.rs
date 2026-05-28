@@ -8,7 +8,7 @@ use std::{io::Cursor, mem::MaybeUninit};
 
 use up_rust::{
     zero_copy::{
-        LoanedPayload, LoanedPayloadUninitMut, PayloadLoanKind, UContiguousZeroCopyRxFrame,
+        LoanedPayload, LoanedPayloadUninitMut, PayloadLoanProvenance, UContiguousZeroCopyRxFrame,
         ULoanedContiguousZeroCopyRxFrame, UTxBuffer, UUninitTxBuffer, UZeroCopyRxFrame,
     },
     PayloadEncoding, UAttributes, UCode, UFrameMetadata, UMessageType, UPayloadFormat, UPriority,
@@ -24,13 +24,13 @@ const LOLA_FRAME_HEADER_LEN: usize = 20;
 
 /// LoLa transmit loan for one native uProtocol frame.
 ///
-/// Values are returned by the [`UZeroCopyTransport`](up_rust::zero_copy::UZeroCopyTransport)
+/// Values are returned by [`UZeroCopyTransport::loan_tx`](up_rust::zero_copy::UZeroCopyTransport::loan_tx)
 /// implementation for [`UTransportLola`](crate::UTransportLola). The exposed
 /// [`UTxBuffer::payload_mut`] range points at the application payload inside a
 /// fixed LoLa event sample. The preceding `ULOL` header, encoded metadata, and
 /// alignment padding are hidden from callers.
 ///
-/// Metadata is fixed when the loan is reserved so the payload offset remains
+/// Metadata is fixed when the loan is created so the payload offset remains
 /// stable while serializers write directly into the exposed payload range.
 pub struct LolaTxLoan {
     metadata: UFrameMetadata,
@@ -222,6 +222,10 @@ impl UTxBuffer for LolaTxLoan {
             .get_mut(self.payload_offset..end)
             .expect("LoLa payload layout should be valid")
     }
+
+    fn payload_loan_provenance(&self) -> PayloadLoanProvenance {
+        PayloadLoanProvenance::OpaqueTransportLoan
+    }
 }
 
 impl UUninitTxBuffer for LolaUninitTxLoan {
@@ -235,7 +239,12 @@ impl UUninitTxBuffer for LolaUninitTxLoan {
         self.payload_len
     }
 
+    fn payload_loan_provenance(&self) -> PayloadLoanProvenance {
+        PayloadLoanProvenance::OpaqueTransportLoan
+    }
+
     fn payload_uninit_mut(&mut self) -> LoanedPayloadUninitMut<'_> {
+        let provenance = self.payload_loan_provenance();
         let end = self
             .payload_offset
             .checked_add(self.payload_len)
@@ -248,7 +257,7 @@ impl UUninitTxBuffer for LolaUninitTxLoan {
         // SAFETY:
         // - The range was checked against the sample above and is the exact
         //   visible application payload range computed when the loan was
-        //   reserved.
+        //   created.
         // - `&mut self` gives exclusive access to the sample while the loaned
         //   payload view exists.
         // - Per https://doc.rust-lang.org/stable/std/slice/fn.from_raw_parts_mut.html#safety,
@@ -256,7 +265,7 @@ impl UUninitTxBuffer for LolaUninitTxLoan {
         //   `len * size_of::<T>()` many bytes" and "must not be accessed
         //   through any other pointer" for the returned lifetime; the mutable
         //   sample borrow provides that exclusivity.
-        unsafe { LoanedPayloadUninitMut::new_unchecked(payload, PayloadLoanKind::TransportLoan) }
+        unsafe { LoanedPayloadUninitMut::new_unchecked(payload, provenance) }
     }
 
     unsafe fn assume_payload_init(self) -> Self::Initialized {
@@ -422,7 +431,9 @@ impl ULoanedContiguousZeroCopyRxFrame for LolaRxLease {
         //   a borrowed slice's data must be "valid for reads" and "contained
         //   within a single allocation"; `try_contiguous_payload` returns a
         //   subslice from the sample allocation.
-        Ok(unsafe { LoanedPayload::new_unchecked(payload, PayloadLoanKind::TransportLoan) })
+        Ok(unsafe {
+            LoanedPayload::new_unchecked(payload, PayloadLoanProvenance::OpaqueTransportLoan)
+        })
     }
 }
 

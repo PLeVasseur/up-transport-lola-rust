@@ -13,9 +13,9 @@ use std::{
 use async_trait::async_trait;
 use tokio::{sync::Mutex, task::JoinHandle};
 use up_rust::{
-    transport::{validate_frame_metadata_for_payload, verify_filter_criteria},
+    transport::verify_filter_criteria,
     zero_copy::{UZeroCopyListener, UZeroCopyRxFrame, UZeroCopyTransport},
-    UCode, UFrameMetadata, UStatus, UUri, UZeroCopyUninitTransport,
+    UCode, UStatus, UTxLoanSpec, UUri, UZeroCopyUninitTransport,
 };
 
 #[cfg(feature = "lola-ffi")]
@@ -254,12 +254,10 @@ impl UZeroCopyTransport for UTransportLola {
     type Tx = LolaTxLoan;
     type Rx = LolaRxLease;
 
-    async fn reserve(
-        &self,
-        metadata: UFrameMetadata,
-        payload_len: usize,
-        alignment: usize,
-    ) -> Result<Self::Tx, UStatus> {
+    async fn loan_tx(&self, spec: UTxLoanSpec) -> Result<Self::Tx, UStatus> {
+        let metadata = spec.metadata().clone();
+        let payload_len = spec.payload_len();
+        let alignment = spec.payload_alignment();
         validate_alignment(alignment)?;
         if alignment > self.config.sample_alignment {
             return Err(UStatus::fail_with_code(
@@ -270,21 +268,13 @@ impl UZeroCopyTransport for UTransportLola {
                 ),
             ));
         }
-        if metadata.encoding().is_none() && payload_len != 0 {
-            return Err(UStatus::fail_with_code(
-                UCode::INVALID_ARGUMENT,
-                "message payload is present but payload encoding is absent",
-            ));
-        }
-        validate_frame_metadata_for_payload(&metadata, metadata.encoding().is_some())?;
-
         #[cfg(feature = "test-stub")]
         {
             LolaTxLoan::new_vec(metadata, self.config.sample_size, payload_len, alignment)
         }
         #[cfg(feature = "lola-ffi")]
         {
-            let sample = self.native.reserve()?;
+            let sample = self.native.loan_sample()?;
             LolaTxLoan::new_native(metadata, sample, payload_len, alignment)
         }
     }
@@ -399,12 +389,10 @@ impl UZeroCopyTransport for UTransportLola {
 impl UZeroCopyUninitTransport for UTransportLola {
     type UninitTx = LolaUninitTxLoan;
 
-    async fn reserve_uninit(
-        &self,
-        metadata: UFrameMetadata,
-        payload_len: usize,
-        alignment: usize,
-    ) -> Result<Self::UninitTx, UStatus> {
+    async fn loan_uninit_tx(&self, spec: UTxLoanSpec) -> Result<Self::UninitTx, UStatus> {
+        let metadata = spec.metadata().clone();
+        let payload_len = spec.payload_len();
+        let alignment = spec.payload_alignment();
         validate_alignment(alignment)?;
         if alignment > self.config.sample_alignment {
             return Err(UStatus::fail_with_code(
@@ -415,21 +403,13 @@ impl UZeroCopyUninitTransport for UTransportLola {
                 ),
             ));
         }
-        if metadata.encoding().is_none() && payload_len != 0 {
-            return Err(UStatus::fail_with_code(
-                UCode::INVALID_ARGUMENT,
-                "message payload is present but payload encoding is absent",
-            ));
-        }
-        validate_frame_metadata_for_payload(&metadata, metadata.encoding().is_some())?;
-
         #[cfg(feature = "test-stub")]
         {
             LolaUninitTxLoan::new_vec(metadata, self.config.sample_size, payload_len, alignment)
         }
         #[cfg(feature = "lola-ffi")]
         {
-            let sample = self.native.reserve()?;
+            let sample = self.native.loan_sample()?;
             LolaUninitTxLoan::new_native(metadata, sample, payload_len, alignment)
         }
     }
@@ -467,11 +447,12 @@ mod tests {
         payload::{PlacementDefault, RawBytes, StableContainerPayload, UWireError},
         test_util::zero_copy_conformance,
         zero_copy::{
-            UContiguousZeroCopyRxFrame, UTxBuffer, UZeroCopyListener, UZeroCopyTransport,
-            UZeroCopyTransportExt,
+            UContiguousZeroCopyRxFrame, ULoanedContiguousZeroCopyRxFrame, UTxBuffer,
+            UZeroCopyListener, UZeroCopyTransport, UZeroCopyTransportExt,
         },
-        PayloadEncoding, ProtobufPayload, UAttributes, UCode, UFrameBuilder, UFrameMetadata,
-        UMessageType, UUri, UZeroCopyUninitTransportExt, UUID,
+        PayloadEncoding, PayloadLayout, ProtobufPayload, UAttributes, UCode, UFrameBuilder,
+        UFrameMetadata, UMessageType, UTxLoanSpec, UUri, UZeroCopyUninitTransport,
+        UZeroCopyUninitTransportExt, UUID,
     };
 
     use super::*;
@@ -524,6 +505,18 @@ mod tests {
         )
     }
 
+    fn payload_loan_spec(
+        metadata: UFrameMetadata,
+        payload_len: usize,
+        alignment: usize,
+    ) -> UTxLoanSpec {
+        UTxLoanSpec::payload(
+            metadata,
+            PayloadLayout::new(payload_len, alignment).expect("test layout should be valid"),
+        )
+        .expect("test metadata should be valid for payload")
+    }
+
     struct ListenerSender(mpsc::UnboundedSender<(UFrameMetadata, Vec<u8>)>);
 
     #[async_trait]
@@ -552,7 +545,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn reserve_send_receive_round_trips_payload_in_stub_backend() {
+    async fn loan_send_receive_round_trips_payload_in_stub_backend() {
         let transport = UTransportLola::build(config()).unwrap();
         let topic = UUri::try_from_parts("vehicle", 0x4210, 1, 0x9000).unwrap();
         let frame = UFrameBuilder::publish(topic.clone())
@@ -560,7 +553,11 @@ mod tests {
             .build_with_raw_payload(b"payload".as_slice())
             .unwrap();
         let mut loan = transport
-            .reserve(frame.metadata().clone(), frame.payload_bytes().len(), 1)
+            .loan_tx(payload_loan_spec(
+                frame.metadata().clone(),
+                frame.payload_bytes().len(),
+                1,
+            ))
             .await
             .unwrap();
         loan.payload_mut().copy_from_slice(frame.payload_bytes());
@@ -661,11 +658,7 @@ mod tests {
             mem::align_of::<VehiclePose>(),
         )
         .unwrap();
-        let pose = zero_copy_conformance::borrow_loaned_payload_as::<
-            StableContainerPayload<VehiclePose>,
-            VehiclePose,
-        >(&received)
-        .unwrap();
+        let pose = received.borrow_stable_payload::<VehiclePose>().unwrap();
 
         assert_eq!(
             received.metadata().encoding(),
@@ -705,55 +698,55 @@ mod tests {
             }
         }
         let received = received.expect("timed out waiting for LoLa stable-container sample");
-        let pose = zero_copy_conformance::borrow_loaned_payload_as::<
-            StableContainerPayload<VehiclePose>,
-            VehiclePose,
-        >(&received)
-        .unwrap();
+        let pose = received.borrow_stable_payload::<VehiclePose>().unwrap();
 
         assert_eq!(pose, &VehiclePose { x: 55, y: 89 });
     }
 
     #[tokio::test]
-    async fn stub_backend_uninit_reserve_rejects_excessive_alignment() {
+    async fn stub_backend_uninit_loan_rejects_excessive_alignment() {
         let transport = UTransportLola::build(config()).unwrap();
         let topic = UUri::try_from_parts("vehicle", 0x4210, 1, 0x9009).unwrap();
 
         let result = transport
-            .reserve_uninit(deterministic_publish_metadata(topic), 8, 16)
+            .loan_uninit_tx(payload_loan_spec(
+                deterministic_publish_metadata(topic).with_encoding(RawBytes::encoding()),
+                8,
+                16,
+            ))
             .await;
         let Err(error) = result else {
-            panic!("LoLa uninit reserve should reject excessive alignment");
+            panic!("LoLa uninit loan should reject excessive alignment");
         };
 
         assert_eq!(error.get_code(), UCode::INVALID_ARGUMENT);
     }
 
     #[tokio::test]
-    async fn stub_backend_reserve_rejects_payload_without_encoding() {
-        let transport = UTransportLola::build(config()).unwrap();
+    async fn stub_backend_loan_spec_rejects_payload_without_encoding() {
         let topic = UUri::try_from_parts("vehicle", 0x4210, 1, 0x9012).unwrap();
 
-        let result = transport
-            .reserve(deterministic_publish_metadata(topic), 1, 1)
-            .await;
+        let result = UTxLoanSpec::payload(
+            deterministic_publish_metadata(topic),
+            PayloadLayout::new(1, 1).unwrap(),
+        );
         let Err(error) = result else {
-            panic!("LoLa reserve should reject payload bytes without encoding");
+            panic!("LoLa loan spec should reject payload bytes without encoding");
         };
 
         assert_eq!(error.get_code(), UCode::INVALID_ARGUMENT);
     }
 
     #[tokio::test]
-    async fn stub_backend_reserve_uninit_rejects_payload_without_encoding() {
-        let transport = UTransportLola::build(config()).unwrap();
+    async fn stub_backend_uninit_loan_spec_rejects_payload_without_encoding() {
         let topic = UUri::try_from_parts("vehicle", 0x4210, 1, 0x9013).unwrap();
 
-        let result = transport
-            .reserve_uninit(deterministic_publish_metadata(topic), 1, 1)
-            .await;
+        let result = UTxLoanSpec::payload(
+            deterministic_publish_metadata(topic),
+            PayloadLayout::new(1, 1).unwrap(),
+        );
         let Err(error) = result else {
-            panic!("LoLa uninit reserve should reject payload bytes without encoding");
+            panic!("LoLa uninit loan spec should reject payload bytes without encoding");
         };
 
         assert_eq!(error.get_code(), UCode::INVALID_ARGUMENT);
@@ -764,10 +757,12 @@ mod tests {
         let transport = UTransportLola::build(config()).unwrap();
         let topic = UUri::try_from_parts("vehicle", 0x4210, 1, 0x9014).unwrap();
         let loan = transport
-            .reserve(
-                deterministic_publish_metadata(topic.clone()).with_encoding(RawBytes::encoding()),
-                0,
-                1,
+            .loan_tx(
+                UTxLoanSpec::present_empty_payload(
+                    deterministic_publish_metadata(topic.clone())
+                        .with_encoding(RawBytes::encoding()),
+                )
+                .unwrap(),
             )
             .await
             .unwrap();
@@ -797,7 +792,9 @@ mod tests {
         let transport = UTransportLola::build(config()).unwrap();
         let topic = UUri::try_from_parts("vehicle", 0x4210, 1, 0x9015).unwrap();
         let loan = transport
-            .reserve(deterministic_publish_metadata(topic.clone()), 0, 1)
+            .loan_tx(
+                UTxLoanSpec::no_payload(deterministic_publish_metadata(topic.clone())).unwrap(),
+            )
             .await
             .unwrap();
         transport.send_zero_copy(loan).await.unwrap();
@@ -827,11 +824,11 @@ mod tests {
         let topic = UUri::try_from_parts("vehicle", 0x4210, 1, 0x9010).unwrap();
 
         let loan = transport
-            .reserve(
+            .loan_tx(payload_loan_spec(
                 deterministic_publish_metadata(topic).with_encoding(RawBytes::encoding()),
                 4,
                 1,
-            )
+            ))
             .await
             .unwrap();
 
@@ -850,11 +847,11 @@ mod tests {
             mem::align_of::<VehiclePose>(),
         );
         let mut loan = transport
-            .reserve(
+            .loan_tx(payload_loan_spec(
                 deterministic_publish_metadata(topic.clone()).with_encoding(encoding),
                 mem::size_of::<VehiclePose>(),
                 mem::align_of::<VehiclePose>(),
-            )
+            ))
             .await
             .unwrap();
         loan.payload_mut().copy_from_slice(bytes_of_pose(&pose));
@@ -874,11 +871,7 @@ mod tests {
             }
         }
         let received = received.expect("timed out waiting for malformed stable-container sample");
-        let error = zero_copy_conformance::borrow_loaned_payload_as::<
-            StableContainerPayload<VehiclePose>,
-            VehiclePose,
-        >(&received)
-        .unwrap_err();
+        let error = received.borrow_stable_payload::<VehiclePose>().unwrap_err();
 
         assert!(matches!(
             error,
@@ -967,7 +960,11 @@ mod tests {
             .unwrap();
 
         let mut loan = transport
-            .reserve(frame.metadata().clone(), frame.payload_bytes().len(), 1)
+            .loan_tx(payload_loan_spec(
+                frame.metadata().clone(),
+                frame.payload_bytes().len(),
+                1,
+            ))
             .await
             .unwrap();
         loan.payload_mut().copy_from_slice(frame.payload_bytes());
@@ -1012,7 +1009,11 @@ mod tests {
             .unwrap();
 
         let mut loan = transport
-            .reserve(frame.metadata().clone(), frame.payload_bytes().len(), 1)
+            .loan_tx(payload_loan_spec(
+                frame.metadata().clone(),
+                frame.payload_bytes().len(),
+                1,
+            ))
             .await
             .unwrap();
         loan.payload_mut().copy_from_slice(frame.payload_bytes());
@@ -1111,12 +1112,11 @@ mod native_tests {
     use tokio::sync::mpsc;
     use up_rust::{
         payload::{RawBytes, StableContainerPayload},
-        test_util::zero_copy_conformance,
         zero_copy::{
-            UContiguousZeroCopyRxFrame, UTxBuffer, UZeroCopyListener, UZeroCopyTransport,
-            UZeroCopyTransportExt,
+            UContiguousZeroCopyRxFrame, ULoanedContiguousZeroCopyRxFrame, UTxBuffer,
+            UZeroCopyListener, UZeroCopyTransport, UZeroCopyTransportExt,
         },
-        UAttributes, UFrameBuilder, UFrameMetadata, UMessageType, UUri,
+        PayloadLayout, UAttributes, UFrameBuilder, UFrameMetadata, UMessageType, UTxLoanSpec, UUri,
         UZeroCopyUninitTransportExt, UUID,
     };
 
@@ -1184,9 +1184,21 @@ mod native_tests {
             .await
     }
 
+    fn payload_loan_spec(
+        metadata: UFrameMetadata,
+        payload_len: usize,
+        alignment: usize,
+    ) -> UTxLoanSpec {
+        UTxLoanSpec::payload(
+            metadata,
+            PayloadLayout::new(payload_len, alignment).expect("test layout should be valid"),
+        )
+        .expect("test metadata should be valid for payload")
+    }
+
     #[tokio::test]
     #[ignore = "requires the native S-CORE LoLa runtime fixture"]
-    async fn native_reserve_send_receive_round_trips_payload() {
+    async fn native_loan_send_receive_round_trips_payload() {
         let _guard = native_test_guard().await;
         let config = native_test_config();
         let authority = config.local_authority.clone();
@@ -1204,7 +1216,11 @@ mod native_tests {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
         let mut loan = transport
-            .reserve(frame.metadata().clone(), frame.payload_bytes().len(), 1)
+            .loan_tx(payload_loan_spec(
+                frame.metadata().clone(),
+                frame.payload_bytes().len(),
+                1,
+            ))
             .await
             .unwrap();
         loan.payload_mut().copy_from_slice(frame.payload_bytes());
@@ -1271,11 +1287,9 @@ mod native_tests {
             }
         }
         let received = received.expect("timed out waiting for LoLa stable native sample");
-        let pose = zero_copy_conformance::borrow_loaned_payload_as::<
-            StableContainerPayload<NativeVehiclePose>,
-            NativeVehiclePose,
-        >(&received)
-        .unwrap();
+        let pose = received
+            .borrow_stable_payload::<NativeVehiclePose>()
+            .unwrap();
 
         assert_eq!(pose, &NativeVehiclePose { x: 144, y: 233 });
     }
@@ -1293,22 +1307,22 @@ mod native_tests {
         for _ in 0..max_samples {
             loans.push(
                 transport
-                    .reserve(
+                    .loan_tx(payload_loan_spec(
                         UFrameMetadata::publish(topic.clone()).with_encoding(RawBytes::encoding()),
                         1,
                         1,
-                    )
+                    ))
                     .await
                     .unwrap(),
             );
         }
 
         let result = transport
-            .reserve(
+            .loan_tx(payload_loan_spec(
                 UFrameMetadata::publish(topic.clone()).with_encoding(RawBytes::encoding()),
                 1,
                 1,
-            )
+            ))
             .await;
         let Err(error) = result else {
             panic!("LoLa native TX wrapper/sample pool should be exhausted");
@@ -1317,11 +1331,11 @@ mod native_tests {
 
         drop(loans.pop());
         transport
-            .reserve(
+            .loan_tx(payload_loan_spec(
                 UFrameMetadata::publish(topic).with_encoding(RawBytes::encoding()),
                 1,
                 1,
-            )
+            ))
             .await
             .unwrap();
     }
@@ -1354,7 +1368,11 @@ mod native_tests {
             .unwrap();
 
         let mut loan = transport
-            .reserve(frame.metadata().clone(), frame.payload_bytes().len(), 1)
+            .loan_tx(payload_loan_spec(
+                frame.metadata().clone(),
+                frame.payload_bytes().len(),
+                1,
+            ))
             .await
             .unwrap();
         loan.payload_mut().copy_from_slice(frame.payload_bytes());

@@ -5,7 +5,6 @@
  ********************************************************************************/
 
 use up_rust::{
-    payload::StableContainerPayload,
     zero_copy::{ULoanedContiguousZeroCopyRxFrame, UZeroCopyRxFrame, UZeroCopyTransport},
     UCode, UUri,
 };
@@ -55,13 +54,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     loop {
         match transport.receive_zero_copy(&source_filter, None).await {
             Ok(frame) => {
-                let pose = frame
-                    .borrow_loaned_payload_as::<StableContainerPayload<VehiclePose>, VehiclePose>(
-                    )?;
+                let pose = frame.borrow_stable_payload::<VehiclePose>()?;
                 println!(
-                    "Received LoLa stable pose [source: {}, loan kind: {:?}, pose: {:?}]",
+                    "Received LoLa stable pose [source: {}, loan provenance: {:?}, pose: {:?}]",
                     frame.metadata().source().to_uri(false),
-                    frame.payload_loan_kind(),
+                    frame.payload_loan_provenance()?,
                     pose
                 );
             }

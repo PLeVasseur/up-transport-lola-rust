@@ -12,10 +12,10 @@ Zero-copy uProtocol transport for Eclipse S-CORE LoLa.
 | Alignment padding | Hidden between metadata and payload |
 | Application payload bytes | Exposed `LolaTxLoan` / `LolaRxLease` payload slice |
 
-Metadata is final at `reserve`, so LoLa can compute the metadata length and aligned payload offset before returning the transmit loan. After reserve, `payload_mut()` is the only mutable zero-copy surface.
+Metadata is final at `loan_tx`, so LoLa can compute the metadata length and aligned payload offset before returning the transmit loan. After `loan_tx`, `payload_mut()` is the only mutable zero-copy surface.
 
 LoLa also implements `up_rust::UZeroCopyUninitTransport`. The initialized
-`reserve` path keeps `UTxBuffer::payload()` and `payload_mut()` sound by exposing
+`loan_tx` path keeps `UTxBuffer::payload()` and `payload_mut()` sound by exposing
 initialized bytes. The uninitialized path is separate and lets stable typed
 payloads be constructed directly in the LoLa event sample without pre-zeroing the
 application payload region; the binding still initializes the `ULOL` header,
@@ -40,6 +40,8 @@ transport
 ```
 
 Receive code should use `UZeroCopyRxFrame::deserialize_from_reader::<Codec, T>()` for owned decodes, or `UContiguousZeroCopyRxFrame::deserialize_borrowed::<Codec, T>()` when the decoded type borrows directly from the LoLa sample payload.
+Stable-container typed receive should use `borrow_stable_payload<T>()` on the
+loan-backed `LolaRxLease`; the diagnostic provenance value is not a safety gate.
 
 Stable typed payloads can avoid both a source payload copy and codec-level
 default initialization:
@@ -190,11 +192,16 @@ This avoids generated type bindings and maps uProtocol frame bytes into fixed-si
 
 The bridge exposes the LoLa event slot's raw sample storage to Rust. S-CORE's current generic skeleton allocation path returns an owning loan whose pointer can reference the generic `EventDataStorage` object base, while the generic proxy receives bytes from the raw event slot array. The bridge keeps the original loan for `Send` ownership but writes frame bytes through `EventDataStorage::data()` so TX and RX use the same sample storage.
 
+Rust reports LoLa payload provenance as `OpaqueTransportLoan`. The path is still a
+native loan-backed LoLa sample path, but the Rust binding does not currently have
+a transport-independent proof that the S-CORE allocation is a shareable memory
+region with stronger `PayloadLoanProvenance::SharedMemory` semantics.
+
 The bridge separates provider and subscriber ownership. `NativeTransport` owns the `GenericSkeleton`/`GenericSkeletonEvent` path used for `Allocate` and `Send`; each direct receive path or registered listener owns a separate `GenericProxy`/`GenericProxyEvent` subscription. This mirrors the S-CORE Rust binding model and lets a local listener and a streamer listener receive the same LoLa event through independent subscription queues.
 
 TX loan wrappers and RX sample wrappers are drawn from bounded C++ owner pools
 sized by `max_samples`. The native bridge does not allocate or delete per-sample
-wrapper objects on the reserve/receive happy path; pool exhaustion maps to
+wrapper objects on the loan/receive happy path; pool exhaustion maps to
 `RESOURCE_EXHAUSTED`, and slots are returned on send or when Rust drops unsent TX
 loans and RX leases.
 
@@ -224,7 +231,7 @@ Run the ignored native runtime tests. They use `tests/fixtures/mw_com_config.jso
 scripts/run-native-validation.sh native
 ```
 
-With the checked-in fixture, the native runtime tests cover direct reserve/send/receive loopback and two independent listener subscriptions receiving the same LoLa event. Invalid frame magic diagnostics still include the first four sample bytes to make stale, foreign, or incorrectly mapped shared-memory samples actionable.
+With the checked-in fixture, the native runtime tests cover direct loan/send/receive loopback and two independent listener subscriptions receiving the same LoLa event. Invalid frame magic diagnostics still include the first four sample bytes to make stale, foreign, or incorrectly mapped shared-memory samples actionable.
 
 Override the checked-in fixture when needed:
 

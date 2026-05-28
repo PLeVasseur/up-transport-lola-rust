@@ -91,7 +91,7 @@ pub struct UpLolaRxSample {
     _private: [u8; 0],
 }
 
-// SAFETY:
+// Native ABI contract:
 // - These declarations must exactly match the native LoLa bridge ABI for opaque
 //   handles, pointer mutability, and out-parameter ownership transfer.
 // - Rust wrappers check null out-parameters before constructing `NonNull` and
@@ -154,7 +154,7 @@ impl NativeTransport {
         // SAFETY: `ffi_config` and `out` are valid for the duration of the call;
         // the bridge initializes `out` to either null on failure or an owned
         // transport handle on success.
-        let status = unsafe { up_lola_transport_create(&ffi_config, &mut out) };
+        let status = unsafe { up_lola_transport_create(&raw const ffi_config, &raw mut out) };
         map_status(status, "create LoLa transport")?;
         let ptr = NonNull::new(out).ok_or_else(|| {
             UStatus::fail_with_code(UCode::INTERNAL, "LoLa bridge returned null transport")
@@ -162,12 +162,12 @@ impl NativeTransport {
         Ok(Self { ptr })
     }
 
-    pub(crate) fn reserve(&self) -> Result<NativeTxLoan, UStatus> {
+    pub(crate) fn loan_sample(&self) -> Result<NativeTxLoan, UStatus> {
         let mut out = std::ptr::null_mut();
         // SAFETY: `self.ptr` is a live bridge handle owned by this wrapper, and
         // `out` is a valid out-parameter for one TX loan handle.
-        let status = unsafe { up_lola_transport_reserve(self.ptr.as_ptr(), &mut out) };
-        map_status(status, "reserve LoLa sample")?;
+        let status = unsafe { up_lola_transport_reserve(self.ptr.as_ptr(), &raw mut out) };
+        map_status(status, "loan LoLa sample")?;
         NativeTxLoan::new(out)
     }
 
@@ -205,7 +205,7 @@ impl NativeSubscriber {
         let mut out = std::ptr::null_mut();
         // SAFETY: `ffi_config` and `out` are valid for the duration of the call;
         // the bridge initializes `out` to an owned subscriber handle on success.
-        let status = unsafe { up_lola_subscriber_create(&ffi_config, &mut out) };
+        let status = unsafe { up_lola_subscriber_create(&raw const ffi_config, &raw mut out) };
         map_status(status, "create LoLa subscriber")?;
         let ptr = NonNull::new(out).ok_or_else(|| {
             UStatus::fail_with_code(UCode::INTERNAL, "LoLa bridge returned null subscriber")
@@ -217,7 +217,7 @@ impl NativeSubscriber {
         let mut out = std::ptr::null_mut();
         // SAFETY: `self.ptr` is a live subscriber handle and `out` is a valid
         // out-parameter for one received sample handle.
-        let status = unsafe { up_lola_subscriber_receive(self.ptr.as_ptr(), &mut out) };
+        let status = unsafe { up_lola_subscriber_receive(self.ptr.as_ptr(), &raw mut out) };
         map_status(status, "receive LoLa sample")?;
         NativeRxSample::new(out)
     }

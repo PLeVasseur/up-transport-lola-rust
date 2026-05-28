@@ -31,7 +31,7 @@ pub struct LolaTransportConfig {
     /// Required LoLa event sample alignment in bytes.
     ///
     /// This must be a non-zero power of two and must be at least as strict as any
-    /// serializer alignment requested through `reserve`.
+    /// serializer alignment requested through `loan_tx`.
     pub sample_alignment: usize,
     /// Maximum number of samples configured for the LoLa event.
     pub max_samples: usize,
