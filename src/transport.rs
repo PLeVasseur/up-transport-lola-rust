@@ -37,8 +37,9 @@ use crate::{
 /// tests and does not communicate with a LoLa runtime.
 ///
 /// This transport implements only the zero-copy capability. Use
-/// [`up_rust::transport::UOwnedFrameEndpoint::from_zero_copy`] when a router or
-/// bridge needs an owned-frame facade; that adapter copies at the boundary.
+/// [`up_rust::transport::UOwnedFrameEndpoint::from_zero_copy_copying_adapter`]
+/// when a router or bridge needs an owned-frame facade; that adapter copies at
+/// the boundary.
 pub struct UTransportLola {
     config: LolaTransportConfig,
     self_ref: Weak<UTransportLola>,
@@ -494,9 +495,14 @@ mod tests {
     }
 
     fn bytes_of_pose(pose: &VehiclePose) -> &[u8] {
-        // SAFETY: `pose` is a valid shared reference to `VehiclePose`, and the
-        // returned slice covers exactly `size_of::<VehiclePose>()` bytes for the
-        // lifetime of that reference.
+        // SAFETY:
+        // - `pose` is a non-null, aligned, initialized shared reference to one
+        //   `VehiclePose`, so the byte range is contained in that object's
+        //   allocation and is valid for reads for this borrow's lifetime.
+        // - The returned slice covers exactly `size_of::<VehiclePose>()` bytes
+        //   and does not outlive `pose`.
+        // - `u8` has alignment 1 and may view the object representation without
+        //   imposing a stronger alignment or validity requirement.
         unsafe {
             std::slice::from_raw_parts(
                 (pose as *const VehiclePose).cast::<u8>(),
@@ -721,6 +727,98 @@ mod tests {
         };
 
         assert_eq!(error.get_code(), UCode::INVALID_ARGUMENT);
+    }
+
+    #[tokio::test]
+    async fn stub_backend_reserve_rejects_payload_without_encoding() {
+        let transport = UTransportLola::build(config()).unwrap();
+        let topic = UUri::try_from_parts("vehicle", 0x4210, 1, 0x9012).unwrap();
+
+        let result = transport
+            .reserve(deterministic_publish_metadata(topic), 1, 1)
+            .await;
+        let Err(error) = result else {
+            panic!("LoLa reserve should reject payload bytes without encoding");
+        };
+
+        assert_eq!(error.get_code(), UCode::INVALID_ARGUMENT);
+    }
+
+    #[tokio::test]
+    async fn stub_backend_reserve_uninit_rejects_payload_without_encoding() {
+        let transport = UTransportLola::build(config()).unwrap();
+        let topic = UUri::try_from_parts("vehicle", 0x4210, 1, 0x9013).unwrap();
+
+        let result = transport
+            .reserve_uninit(deterministic_publish_metadata(topic), 1, 1)
+            .await;
+        let Err(error) = result else {
+            panic!("LoLa uninit reserve should reject payload bytes without encoding");
+        };
+
+        assert_eq!(error.get_code(), UCode::INVALID_ARGUMENT);
+    }
+
+    #[tokio::test]
+    async fn stub_backend_preserves_present_empty_payload() {
+        let transport = UTransportLola::build(config()).unwrap();
+        let topic = UUri::try_from_parts("vehicle", 0x4210, 1, 0x9014).unwrap();
+        let loan = transport
+            .reserve(
+                deterministic_publish_metadata(topic.clone()).with_encoding(RawBytes::encoding()),
+                0,
+                1,
+            )
+            .await
+            .unwrap();
+        transport.send_zero_copy(loan).await.unwrap();
+
+        let mut received = None;
+        for _ in 0..100 {
+            match transport.receive_zero_copy(&topic, None).await {
+                Ok(frame) => {
+                    received = Some(frame);
+                    break;
+                }
+                Err(status) if status.get_code() == UCode::NOT_FOUND => {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+                Err(status) => panic!("unexpected LoLa receive error: {status:?}"),
+            }
+        }
+        let received = received.expect("timed out waiting for LoLa present-empty sample");
+        assert!(received.has_payload());
+        assert_eq!(received.payload_len(), 0);
+        assert_eq!(received.metadata().encoding(), Some(&RawBytes::encoding()));
+    }
+
+    #[tokio::test]
+    async fn stub_backend_preserves_no_payload() {
+        let transport = UTransportLola::build(config()).unwrap();
+        let topic = UUri::try_from_parts("vehicle", 0x4210, 1, 0x9015).unwrap();
+        let loan = transport
+            .reserve(deterministic_publish_metadata(topic.clone()), 0, 1)
+            .await
+            .unwrap();
+        transport.send_zero_copy(loan).await.unwrap();
+
+        let mut received = None;
+        for _ in 0..100 {
+            match transport.receive_zero_copy(&topic, None).await {
+                Ok(frame) => {
+                    received = Some(frame);
+                    break;
+                }
+                Err(status) if status.get_code() == UCode::NOT_FOUND => {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+                Err(status) => panic!("unexpected LoLa receive error: {status:?}"),
+            }
+        }
+        let received = received.expect("timed out waiting for LoLa no-payload sample");
+        assert!(!received.has_payload());
+        assert_eq!(received.payload_len(), 0);
+        assert!(received.metadata().encoding().is_none());
     }
 
     #[tokio::test]

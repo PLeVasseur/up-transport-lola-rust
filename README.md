@@ -48,7 +48,7 @@ default initialization:
 use up_rust::{payload::StableContainerPayload, UFrameMetadata, UZeroCopyUninitTransportExt};
 
 #[repr(C)]
-#[derive(Clone, Copy, up_rust::StablePayload)]
+#[derive(Clone, Copy, up_rust::StablePayload, up_rust::ByteBackedStablePayload)]
 #[stable_payload(type_name = "example.vehicle.VehiclePose")]
 struct VehiclePose {
     x: u64,
@@ -69,6 +69,17 @@ where
 ```
 
 The default build follows the same bundled-native model as the vSomeIP transport: it uses the pinned S-CORE communication submodule, builds the C++ LoLa bridge with Bazel/Bzlmod, and links Cargo against the generated `libup_lola_bridge.so`.
+
+The transport preserves the distinction between no payload and a present empty
+payload: no payload has no `PayloadEncoding`, while a present empty payload keeps
+its encoding and reports payload presence with length zero. Payload bytes with no
+encoding are rejected before send.
+
+Filtered pull receive preserves nonmatching samples in an internal queue so a
+later matching receive call can still observe them. That queue is intentionally
+not exposed as a public API and is not currently bounded by a configurable
+resource policy; deployments with many mismatched pull filters should account for
+that residual resource risk.
 
 ## First-Time Build
 
