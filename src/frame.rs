@@ -7,9 +7,10 @@
 use std::{io::Cursor, mem::MaybeUninit};
 
 use up_rust::{
+    transport::validate_frame_view_for_transport,
     zero_copy::{
         LoanedPayload, LoanedPayloadUninitMut, PayloadLoanProvenance, UContiguousZeroCopyRxFrame,
-        ULoanedContiguousZeroCopyRxFrame, UTxBuffer, UUninitTxBuffer, UZeroCopyRxFrame,
+        UFrameView, ULoanedContiguousZeroCopyRxFrame, UTxBuffer, UUninitTxBuffer, UZeroCopyRxLease,
     },
     PayloadEncoding, UAttributes, UCode, UFrameMetadata, UMessageType, UPayloadFormat, UPriority,
     UStatus, UUri, UUID,
@@ -323,7 +324,7 @@ impl UUninitTxBuffer for LolaUninitTxLoan {
 ///
 /// Dropping the lease releases the underlying LoLa sample. The payload is a
 /// contiguous byte range within the fixed event sample, so this type implements
-/// both [`UZeroCopyRxFrame`] and [`UContiguousZeroCopyRxFrame`]. Decoded values
+/// both [`UZeroCopyRxLease`] and [`UContiguousZeroCopyRxFrame`]. Decoded values
 /// that borrow from [`UContiguousZeroCopyRxFrame::contiguous_payload`] must not
 /// outlive the lease.
 ///
@@ -358,27 +359,31 @@ impl LolaRxLease {
     #[cfg(feature = "test-stub")]
     pub(crate) fn from_vec(sample: Vec<u8>) -> Result<Self, UStatus> {
         let (metadata, payload_offset, payload_len) = read_frame_header(&sample)?;
-        Ok(Self {
+        let lease = Self {
             metadata,
             sample: LolaRxStorage::Vec(sample),
             payload_offset,
             payload_len,
-        })
+        };
+        validate_frame_view_for_transport(&lease)?;
+        Ok(lease)
     }
 
     #[cfg(feature = "lola-ffi")]
     pub(crate) fn from_native(sample: NativeRxSample) -> Result<Self, UStatus> {
         let (metadata, payload_offset, payload_len) = read_frame_header(sample.as_slice())?;
-        Ok(Self {
+        let lease = Self {
             metadata,
             sample: LolaRxStorage::Native(sample),
             payload_offset,
             payload_len,
-        })
+        };
+        validate_frame_view_for_transport(&lease)?;
+        Ok(lease)
     }
 }
 
-impl UZeroCopyRxFrame for LolaRxLease {
+impl UFrameView for LolaRxLease {
     type PayloadReader<'a>
         = Cursor<&'a [u8]>
     where
@@ -409,6 +414,8 @@ impl UZeroCopyRxFrame for LolaRxLease {
         self.sample.as_slice().get(self.payload_offset..end)
     }
 }
+
+impl UZeroCopyRxLease for LolaRxLease {}
 
 impl UContiguousZeroCopyRxFrame for LolaRxLease {
     fn contiguous_payload(&self) -> &[u8] {
@@ -741,7 +748,8 @@ fn decode_metadata(mut bytes: &[u8]) -> Result<UFrameMetadata, UStatus> {
     let permission_level = take_optional_u32(&mut bytes)?;
     let commstatus = take_optional_code(&mut bytes)?;
 
-    let mut attributes = UAttributes::new(id, source, sink, message_type).with_priority(priority);
+    let mut attributes =
+        UAttributes::new_unchecked(id, source, sink, message_type).with_priority(priority);
     if let Some(ttl) = ttl {
         attributes = attributes.with_ttl(ttl);
     }
@@ -766,7 +774,7 @@ fn decode_metadata(mut bytes: &[u8]) -> Result<UFrameMetadata, UStatus> {
             "trailing LoLa metadata bytes",
         ));
     }
-    Ok(UFrameMetadata::new(attributes, encoding))
+    Ok(UFrameMetadata::new_unchecked(attributes, encoding))
 }
 
 fn encode_payload_encoding(bytes: &mut Vec<u8>, encoding: &PayloadEncoding) -> Result<(), UStatus> {
@@ -1003,8 +1011,8 @@ fn byte_to_priority(value: u8) -> Result<UPriority, UStatus> {
 fn deterministic_publish_metadata(topic: UUri) -> UFrameMetadata {
     let id = UUID::from_u64_pair(0x0000_0000_0001_7000, 0x8010_1010_1010_1a1a)
         .expect("fixed UUID should be valid");
-    UFrameMetadata::new(
-        UAttributes::new(id, topic, None, UMessageType::Publish),
+    UFrameMetadata::new_unchecked(
+        UAttributes::new_unchecked(id, topic, None, UMessageType::Publish),
         None::<PayloadEncoding>,
     )
 }

@@ -4,6 +4,12 @@ Zero-copy uProtocol transport for Eclipse S-CORE LoLa.
 
 `UTransportLola` implements `up_rust::zero_copy::UZeroCopyTransport`. It exposes LoLa event samples as native uProtocol frames: callers write only application payload bytes, while the binding stores routing attributes and payload encoding metadata in a hidden `ULOL` frame header and metadata block.
 
+Native-frame conformance coverage includes `ULOL` header validation, standard and
+custom payload encoding preservation, stable-container metadata preservation,
+rejection of payload bytes without encoding metadata, exact application payload
+views that exclude the header, metadata and padding, and loan-backed
+stable-container borrowing from the LoLa receive lease.
+
 | uProtocol frame part | LoLa representation |
 | --- | --- |
 | Frame magic/version and lengths | Hidden `ULOL` header |
@@ -14,7 +20,7 @@ Zero-copy uProtocol transport for Eclipse S-CORE LoLa.
 
 Metadata is final at `loan_tx`, so LoLa can compute the metadata length and aligned payload offset before returning the transmit loan. After `loan_tx`, `payload_mut()` is the only mutable zero-copy surface.
 
-LoLa also implements `up_rust::UZeroCopyUninitTransport`. The initialized
+LoLa also implements `up_rust::zero_copy::UZeroCopyUninitTransport`. The initialized
 `loan_tx` path keeps `UTxBuffer::payload()` and `payload_mut()` sound by exposing
 initialized bytes. The uninitialized path is separate and lets stable typed
 payloads be constructed directly in the LoLa event sample without pre-zeroing the
@@ -39,7 +45,7 @@ transport
 }
 ```
 
-Receive code should use `UZeroCopyRxFrame::deserialize_from_reader::<Codec, T>()` for owned decodes, or `UContiguousZeroCopyRxFrame::deserialize_borrowed::<Codec, T>()` when the decoded type borrows directly from the LoLa sample payload.
+Receive code should use `UFrameView::deserialize_from_reader::<Codec, T>()` for owned decodes, or `UContiguousZeroCopyRxFrame::deserialize_borrowed::<Codec, T>()` when the decoded type borrows directly from the LoLa sample payload.
 Stable-container typed receive should use `borrow_stable_payload<T>()` on the
 loan-backed `LolaRxLease`; the diagnostic provenance value is not a safety gate.
 
@@ -47,7 +53,7 @@ Stable typed payloads can avoid both a source payload copy and codec-level
 default initialization:
 
 ```rust
-use up_rust::{payload::StableContainerPayload, UFrameMetadata, UZeroCopyUninitTransportExt};
+use up_rust::{payload::StableContainerPayload, zero_copy::UZeroCopyUninitTransportExt, UFrameMetadata};
 
 #[repr(C)]
 #[derive(Clone, Copy, up_rust::StablePayload, up_rust::ByteBackedStablePayload)]
@@ -59,7 +65,7 @@ struct VehiclePose {
 
 async fn send<T>(transport: &T, metadata: UFrameMetadata) -> Result<(), up_rust::UStatus>
 where
-    T: up_rust::UZeroCopyUninitTransport,
+    T: up_rust::zero_copy::UZeroCopyUninitTransport,
 {
     transport
         .send_uninit_loaned_payload_as::<StableContainerPayload<VehiclePose>, VehiclePose>(

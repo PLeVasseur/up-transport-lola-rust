@@ -4,7 +4,9 @@
  * SPDX-License-Identifier: Apache-2.0
  ********************************************************************************/
 
-use up_rust::{payload::StableContainerPayload, UFrameMetadata, UUri, UZeroCopyUninitTransportExt};
+use up_rust::{
+    payload::StableContainerPayload, zero_copy::UZeroCopyUninitTransportExt, UFrameMetadata, UUri,
+};
 use up_transport_lola_rust::{LolaTransportConfig, UTransportLola};
 
 #[repr(C)]
@@ -60,7 +62,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
         transport
             .send_uninit_loaned_payload_as::<StableContainerPayload<VehiclePose>, VehiclePose>(
-                UFrameMetadata::publish(topic.clone()),
+                UFrameMetadata::try_publish(topic.clone())?,
                 |slot| Ok(slot.write(pose)),
             )
             .await?;

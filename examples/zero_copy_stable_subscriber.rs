@@ -5,7 +5,7 @@
  ********************************************************************************/
 
 use up_rust::{
-    zero_copy::{ULoanedContiguousZeroCopyRxFrame, UZeroCopyRxFrame, UZeroCopyTransport},
+    zero_copy::{UFrameView, ULoanedContiguousZeroCopyRxFrame, UZeroCopyTransport},
     UCode, UUri,
 };
 use up_transport_lola_rust::{LolaTransportConfig, UTransportLola};

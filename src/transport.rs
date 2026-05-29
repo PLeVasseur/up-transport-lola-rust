@@ -13,9 +13,11 @@ use std::{
 use async_trait::async_trait;
 use tokio::{sync::Mutex, task::JoinHandle};
 use up_rust::{
-    transport::verify_filter_criteria,
-    zero_copy::{UZeroCopyListener, UZeroCopyRxFrame, UZeroCopyTransport},
-    UCode, UStatus, UTxLoanSpec, UUri, UZeroCopyUninitTransport,
+    transport::ValidatedTxLoanSpec,
+    zero_copy::{
+        UFrameView, UZeroCopyListener, UZeroCopyTransportImpl, UZeroCopyUninitTransportImpl,
+    },
+    UCode, UStatus, UUri,
 };
 
 #[cfg(feature = "lola-ffi")]
@@ -250,11 +252,11 @@ impl ListenerRegistration {
 }
 
 #[async_trait]
-impl UZeroCopyTransport for UTransportLola {
+impl UZeroCopyTransportImpl for UTransportLola {
     type Tx = LolaTxLoan;
     type Rx = LolaRxLease;
 
-    async fn loan_tx(&self, spec: UTxLoanSpec) -> Result<Self::Tx, UStatus> {
+    async fn loan_validated_tx(&self, spec: ValidatedTxLoanSpec) -> Result<Self::Tx, UStatus> {
         let metadata = spec.metadata().clone();
         let payload_len = spec.payload_len();
         let alignment = spec.payload_alignment();
@@ -279,7 +281,7 @@ impl UZeroCopyTransport for UTransportLola {
         }
     }
 
-    async fn send_zero_copy(&self, buffer: Self::Tx) -> Result<(), UStatus> {
+    async fn send_validated_zero_copy(&self, buffer: Self::Tx) -> Result<(), UStatus> {
         #[cfg(feature = "test-stub")]
         {
             let sample = buffer.into_vec()?;
@@ -293,12 +295,11 @@ impl UZeroCopyTransport for UTransportLola {
         }
     }
 
-    async fn receive_zero_copy(
+    async fn receive_validated_zero_copy(
         &self,
         source_filter: &UUri,
         sink_filter: Option<&UUri>,
     ) -> Result<Self::Rx, UStatus> {
-        verify_filter_criteria(source_filter, sink_filter)?;
         if let Some(frame) = self
             .pop_queued_pull_sample(source_filter, sink_filter)
             .await
@@ -332,13 +333,12 @@ impl UZeroCopyTransport for UTransportLola {
         }
     }
 
-    async fn register_zero_copy_listener(
+    async fn register_validated_zero_copy_listener(
         &self,
         source_filter: &UUri,
         sink_filter: Option<&UUri>,
         listener: Arc<dyn UZeroCopyListener<Self::Rx>>,
     ) -> Result<(), UStatus> {
-        verify_filter_criteria(source_filter, sink_filter)?;
         {
             let mut listeners = self.listeners.lock().await;
             if listeners.iter().any(|registration| {
@@ -356,13 +356,12 @@ impl UZeroCopyTransport for UTransportLola {
         self.ensure_listener_task().await
     }
 
-    async fn unregister_zero_copy_listener(
+    async fn unregister_validated_zero_copy_listener(
         &self,
         source_filter: &UUri,
         sink_filter: Option<&UUri>,
         listener: Arc<dyn UZeroCopyListener<Self::Rx>>,
     ) -> Result<(), UStatus> {
-        verify_filter_criteria(source_filter, sink_filter)?;
         let should_stop = {
             let mut listeners = self.listeners.lock().await;
             let Some(index) = listeners.iter().position(|registration| {
@@ -386,10 +385,13 @@ impl UZeroCopyTransport for UTransportLola {
 }
 
 #[async_trait]
-impl UZeroCopyUninitTransport for UTransportLola {
+impl UZeroCopyUninitTransportImpl for UTransportLola {
     type UninitTx = LolaUninitTxLoan;
 
-    async fn loan_uninit_tx(&self, spec: UTxLoanSpec) -> Result<Self::UninitTx, UStatus> {
+    async fn loan_validated_uninit_tx(
+        &self,
+        spec: ValidatedTxLoanSpec,
+    ) -> Result<Self::UninitTx, UStatus> {
         let metadata = spec.metadata().clone();
         let payload_len = spec.payload_len();
         let alignment = spec.payload_alignment();
@@ -444,15 +446,15 @@ mod tests {
     use protobuf::well_known_types::wrappers::StringValue;
     use tokio::sync::mpsc;
     use up_rust::{
-        payload::{PlacementDefault, RawBytes, StableContainerPayload, UWireError},
+        payload::{PayloadLayout, PlacementDefault, RawBytes, StableContainerPayload, UWireError},
         test_util::zero_copy_conformance,
         zero_copy::{
-            UContiguousZeroCopyRxFrame, ULoanedContiguousZeroCopyRxFrame, UTxBuffer,
-            UZeroCopyListener, UZeroCopyTransport, UZeroCopyTransportExt,
+            UContiguousZeroCopyRxFrame, UFrameView, ULoanedContiguousZeroCopyRxFrame, UTxBuffer,
+            UTxLoanSpec, UZeroCopyListener, UZeroCopyTransport, UZeroCopyTransportExt,
+            UZeroCopyUninitTransport, UZeroCopyUninitTransportExt,
         },
-        PayloadEncoding, PayloadLayout, ProtobufPayload, UAttributes, UCode, UFrameBuilder,
-        UFrameMetadata, UMessageType, UTxLoanSpec, UUri, UZeroCopyUninitTransport,
-        UZeroCopyUninitTransportExt, UUID,
+        PayloadEncoding, ProtobufPayload, UAttributes, UCode, UFrameBuilder, UFrameMetadata,
+        UMessageType, UUri, UUID,
     };
 
     use super::*;
@@ -499,8 +501,8 @@ mod tests {
 
     fn deterministic_publish_metadata(topic: UUri) -> UFrameMetadata {
         let id = deterministic_message_id();
-        UFrameMetadata::new(
-            UAttributes::new(id, topic, None, UMessageType::Publish),
+        UFrameMetadata::new_unchecked(
+            UAttributes::new_unchecked(id, topic, None, UMessageType::Publish),
             None::<PayloadEncoding>,
         )
     }
@@ -1063,15 +1065,17 @@ mod tests {
             .await
             .unwrap();
 
-        let attributes = UAttributes::new(
+        let attributes = UAttributes::try_new(
             deterministic_message_id(),
             source.clone(),
             Some(sink.clone()),
             UMessageType::Notification,
-        );
+        )
+        .expect("valid notification attributes");
         transport
             .send_serialized_zero_copy::<RawBytes, _>(
-                UFrameMetadata::new(attributes, RawBytes::encoding()),
+                UFrameMetadata::try_new(attributes, RawBytes::encoding())
+                    .expect("valid notification metadata"),
                 &&b"targeted"[..],
             )
             .await
@@ -1111,13 +1115,13 @@ mod native_tests {
     use async_trait::async_trait;
     use tokio::sync::mpsc;
     use up_rust::{
-        payload::{RawBytes, StableContainerPayload},
+        payload::{PayloadLayout, RawBytes, StableContainerPayload},
         zero_copy::{
-            UContiguousZeroCopyRxFrame, ULoanedContiguousZeroCopyRxFrame, UTxBuffer,
-            UZeroCopyListener, UZeroCopyTransport, UZeroCopyTransportExt,
+            UContiguousZeroCopyRxFrame, UFrameView, ULoanedContiguousZeroCopyRxFrame, UTxBuffer,
+            UTxLoanSpec, UZeroCopyListener, UZeroCopyTransport, UZeroCopyTransportExt,
+            UZeroCopyUninitTransportExt,
         },
-        PayloadLayout, UAttributes, UFrameBuilder, UFrameMetadata, UMessageType, UTxLoanSpec, UUri,
-        UZeroCopyUninitTransportExt, UUID,
+        UAttributes, UFrameBuilder, UFrameMetadata, UMessageType, UUri, UUID,
     };
 
     use super::*;
@@ -1263,7 +1267,7 @@ mod native_tests {
                 StableContainerPayload<NativeVehiclePose>,
                 NativeVehiclePose,
             >(
-                UFrameMetadata::publish(topic.clone()),
+                UFrameMetadata::try_publish(topic.clone()).expect("valid publish metadata"),
                 |slot| Ok(slot.write(NativeVehiclePose { x: 144, y: 233 })),
             )
             .await
@@ -1308,7 +1312,9 @@ mod native_tests {
             loans.push(
                 transport
                     .loan_tx(payload_loan_spec(
-                        UFrameMetadata::publish(topic.clone()).with_encoding(RawBytes::encoding()),
+                        UFrameMetadata::try_publish(topic.clone())
+                            .expect("valid publish metadata")
+                            .with_encoding(RawBytes::encoding()),
                         1,
                         1,
                     ))
@@ -1319,7 +1325,9 @@ mod native_tests {
 
         let result = transport
             .loan_tx(payload_loan_spec(
-                UFrameMetadata::publish(topic.clone()).with_encoding(RawBytes::encoding()),
+                UFrameMetadata::try_publish(topic.clone())
+                    .expect("valid publish metadata")
+                    .with_encoding(RawBytes::encoding()),
                 1,
                 1,
             ))
@@ -1332,7 +1340,9 @@ mod native_tests {
         drop(loans.pop());
         transport
             .loan_tx(payload_loan_spec(
-                UFrameMetadata::publish(topic).with_encoding(RawBytes::encoding()),
+                UFrameMetadata::try_publish(topic)
+                    .expect("valid publish metadata")
+                    .with_encoding(RawBytes::encoding()),
                 1,
                 1,
             ))
@@ -1427,7 +1437,7 @@ mod native_tests {
 
         transport
             .send_serialized_zero_copy::<RawBytes, _>(
-                UFrameMetadata::publish(topic.clone()),
+                UFrameMetadata::try_publish(topic.clone()).expect("valid publish metadata"),
                 &&b"source-wildcard"[..],
             )
             .await
@@ -1481,15 +1491,17 @@ mod native_tests {
             .await
             .unwrap();
 
-        let attributes = UAttributes::new(
+        let attributes = UAttributes::try_new(
             UUID::build(),
             source.clone(),
             Some(sink.clone()),
             UMessageType::Notification,
-        );
+        )
+        .expect("valid notification attributes");
         transport
             .send_serialized_zero_copy::<RawBytes, _>(
-                UFrameMetadata::new(attributes, RawBytes::encoding()),
+                UFrameMetadata::try_new(attributes, RawBytes::encoding())
+                    .expect("valid notification metadata"),
                 &&b"sink-wildcard"[..],
             )
             .await
