@@ -20,14 +20,14 @@ test-stub = []
 [dependencies]
 async-trait = "0.1"
 tokio = { version = "1.45.1", default-features = false, features = ["rt", "sync", "time"] }
-up-rust = { git = "https://github.com/PLeVasseur/up-rust.git", rev = "81f4fa71285fdfcda723a50b6b2d0975858a6429" }
+up-rust = { git = "https://github.com/PLeVasseur/up-rust.git", rev = "f697559e0991fee4de2a2510f13b83607a03fc2c" }
 
 [build-dependencies]
 
 [dev-dependencies]
 protobuf = { version = "3.7.2", features = ["with-bytes"] }
 tokio = { version = "1.45.1", default-features = false, features = ["macros", "rt"] }
-up-rust = { git = "https://github.com/PLeVasseur/up-rust.git", rev = "81f4fa71285fdfcda723a50b6b2d0975858a6429", features = ["protobuf-wire", "test-util"] }
+up-rust = { git = "https://github.com/PLeVasseur/up-rust.git", rev = "f697559e0991fee4de2a2510f13b83607a03fc2c", features = ["protobuf-wire", "test-util"] }
 
 [package.metadata.docs.rs]
 no-default-features = true
