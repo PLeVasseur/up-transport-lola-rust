@@ -39,6 +39,12 @@ fn config() -> LolaTransportConfig {
             .ok()
             .and_then(|value| value.parse().ok())
             .unwrap_or(4),
+        pull_mismatch_queue_capacity: std::env::var("LOLA_PULL_MISMATCH_QUEUE_CAPACITY")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(LolaTransportConfig::DEFAULT_PULL_MISMATCH_QUEUE_CAPACITY),
+        pull_mismatch_queue_full_policy:
+            LolaTransportConfig::DEFAULT_PULL_MISMATCH_QUEUE_FULL_POLICY,
         mw_com_config_path: std::env::var("LOLA_MW_COM_CONFIG").ok(),
     }
 }

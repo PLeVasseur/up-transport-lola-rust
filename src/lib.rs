@@ -47,6 +47,6 @@ mod transport;
 #[cfg(feature = "lola-ffi")]
 mod sys;
 
-pub use config::LolaTransportConfig;
+pub use config::{LolaPullMismatchQueueFullPolicy, LolaTransportConfig};
 pub use frame::{LolaRxLease, LolaTxLoan, LolaUninitTxLoan};
-pub use transport::UTransportLola;
+pub use transport::{LolaPullMismatchQueueDiagnostics, UTransportLola};

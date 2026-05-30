@@ -6,6 +6,15 @@
 
 use up_rust::{UCode, UStatus};
 
+/// Full-queue behavior for pull receive samples that do not match the requested filter.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum LolaPullMismatchQueueFullPolicy {
+    /// Preserve bounded pull receive behavior by dropping the oldest retained mismatch.
+    DropOldestAndReport,
+    /// Reject the newest mismatch and return [`UCode::RESOURCE_EXHAUSTED`] to the receive call.
+    RejectNewestAndReport,
+}
+
 /// Configuration for a LoLa uProtocol transport instance.
 ///
 /// The same configuration is used by the native bridge to create the LoLa
@@ -35,6 +44,10 @@ pub struct LolaTransportConfig {
     pub sample_alignment: usize,
     /// Maximum number of samples configured for the LoLa event.
     pub max_samples: usize,
+    /// Maximum retained pull samples that did not match the requested filter.
+    pub pull_mismatch_queue_capacity: usize,
+    /// Policy applied when the pull mismatch queue is full.
+    pub pull_mismatch_queue_full_policy: LolaPullMismatchQueueFullPolicy,
     /// Optional path to the S-CORE `mw_com_config.json` file.
     ///
     /// Native `lola-ffi` builds pass this to the bridge so S-CORE can initialize
@@ -44,6 +57,12 @@ pub struct LolaTransportConfig {
 }
 
 impl LolaTransportConfig {
+    /// Default retained mismatched pull samples for new deployments.
+    pub const DEFAULT_PULL_MISMATCH_QUEUE_CAPACITY: usize = 64;
+    /// Default full-queue behavior for retained mismatched pull samples.
+    pub const DEFAULT_PULL_MISMATCH_QUEUE_FULL_POLICY: LolaPullMismatchQueueFullPolicy =
+        LolaPullMismatchQueueFullPolicy::DropOldestAndReport;
+
     /// Validates the configuration before creating a transport.
     ///
     /// This checks local field invariants such as non-empty identifiers,
@@ -74,6 +93,23 @@ impl LolaTransportConfig {
             ));
         }
         Ok(())
+    }
+
+    /// Sets the maximum retained mismatched pull samples.
+    #[must_use]
+    pub fn with_pull_mismatch_queue_capacity(mut self, value: usize) -> Self {
+        self.pull_mismatch_queue_capacity = value;
+        self
+    }
+
+    /// Sets the full-queue policy for retained mismatched pull samples.
+    #[must_use]
+    pub fn with_pull_mismatch_queue_full_policy(
+        mut self,
+        value: LolaPullMismatchQueueFullPolicy,
+    ) -> Self {
+        self.pull_mismatch_queue_full_policy = value;
+        self
     }
 }
 

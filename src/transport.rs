@@ -23,7 +23,7 @@ use up_rust::{
 #[cfg(feature = "lola-ffi")]
 use crate::sys::{NativeSubscriber, NativeTransport};
 use crate::{
-    config::LolaTransportConfig,
+    config::{LolaPullMismatchQueueFullPolicy, LolaTransportConfig},
     frame::{LolaRxLease, LolaTxLoan, LolaUninitTxLoan},
 };
 
@@ -49,7 +49,7 @@ pub struct UTransportLola {
     listener_task: Mutex<Option<JoinHandle<()>>>,
     #[cfg(feature = "test-stub")]
     pending: Mutex<VecDeque<Vec<u8>>>,
-    pull_pending: Mutex<VecDeque<LolaRxLease>>,
+    pull_mismatch_queue: Mutex<PullMismatchQueueState>,
     #[cfg(feature = "lola-ffi")]
     native: NativeTransport,
     #[cfg(feature = "lola-ffi")]
@@ -74,7 +74,7 @@ impl UTransportLola {
             listener_task: Mutex::new(None),
             #[cfg(feature = "test-stub")]
             pending: Mutex::new(VecDeque::new()),
-            pull_pending: Mutex::new(VecDeque::new()),
+            pull_mismatch_queue: Mutex::new(PullMismatchQueueState::default()),
             #[cfg(feature = "lola-ffi")]
             native,
             #[cfg(feature = "lola-ffi")]
@@ -85,6 +85,11 @@ impl UTransportLola {
     /// Returns the configuration used to build this transport.
     pub fn config(&self) -> &LolaTransportConfig {
         &self.config
+    }
+
+    /// Returns diagnostics for the bounded pull mismatch queue.
+    pub async fn pull_mismatch_queue_diagnostics(&self) -> LolaPullMismatchQueueDiagnostics {
+        self.pull_mismatch_queue.lock().await.diagnostics()
     }
 
     #[cfg(feature = "lola-ffi")]
@@ -197,16 +202,91 @@ impl UTransportLola {
         source_filter: &UUri,
         sink_filter: Option<&UUri>,
     ) -> Option<LolaRxLease> {
-        let mut pending = self.pull_pending.lock().await;
-        let index = pending
+        let mut state = self.pull_mismatch_queue.lock().await;
+        let index = state
+            .queue
             .iter()
             .position(|frame| frame_matches(frame, source_filter, sink_filter))?;
-        pending.remove(index)
+        state.queue.remove(index)
     }
 
-    async fn queue_pull_sample(&self, frame: LolaRxLease) {
-        self.pull_pending.lock().await.push_back(frame);
+    async fn queue_pull_sample(&self, frame: LolaRxLease) -> Result<(), UStatus> {
+        let capacity = self.config.pull_mismatch_queue_capacity;
+        let source = frame.metadata().attributes().source().to_uri(false);
+        let mut state = self.pull_mismatch_queue.lock().await;
+        if capacity == 0 {
+            state.dropped_mismatches = state.dropped_mismatches.saturating_add(1);
+            state.last_mismatch_reason = Some(format!(
+                "dropped mismatched LoLa pull sample from {source}; capacity is 0"
+            ));
+            return Ok(());
+        }
+
+        let is_full = state.queue.len() >= capacity;
+        if is_full
+            && self.config.pull_mismatch_queue_full_policy
+                == LolaPullMismatchQueueFullPolicy::RejectNewestAndReport
+        {
+            state.rejected_mismatches = state.rejected_mismatches.saturating_add(1);
+            state.last_mismatch_reason = Some(format!(
+                "rejected newest mismatched LoLa pull sample from {source}; capacity is {capacity}"
+            ));
+            return Err(UStatus::fail_with_code(
+                UCode::RESOURCE_EXHAUSTED,
+                format!("LoLa pull mismatch queue full; capacity is {capacity}"),
+            ));
+        }
+
+        if is_full {
+            state.queue.pop_front();
+        }
+        state.queue.push_back(frame);
+        let depth = state.queue.len();
+
+        if is_full {
+            state.dropped_mismatches = state.dropped_mismatches.saturating_add(1);
+            state.last_mismatch_reason = Some(format!(
+                "dropped oldest mismatched LoLa pull sample from {source}; capacity is {capacity}"
+            ));
+        } else {
+            state.last_mismatch_reason = Some(format!(
+                "queued mismatched LoLa pull sample from {source}; depth is {depth}"
+            ));
+        }
+        Ok(())
     }
+}
+
+#[derive(Default)]
+struct PullMismatchQueueState {
+    queue: VecDeque<LolaRxLease>,
+    dropped_mismatches: u64,
+    rejected_mismatches: u64,
+    last_mismatch_reason: Option<String>,
+}
+
+impl PullMismatchQueueState {
+    fn diagnostics(&self) -> LolaPullMismatchQueueDiagnostics {
+        LolaPullMismatchQueueDiagnostics {
+            current_depth: self.queue.len(),
+            dropped_mismatches: self.dropped_mismatches,
+            rejected_mismatches: self.rejected_mismatches,
+            last_mismatch_reason: self.last_mismatch_reason.clone(),
+        }
+    }
+}
+
+/// Snapshot of bounded LoLa pull mismatch queue state.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct LolaPullMismatchQueueDiagnostics {
+    /// Total retained mismatch samples.
+    pub current_depth: usize,
+    /// Number of mismatch samples dropped because the queue was full or capacity was zero.
+    pub dropped_mismatches: u64,
+    /// Number of mismatch samples rejected by [`LolaPullMismatchQueueFullPolicy::RejectNewestAndReport`].
+    pub rejected_mismatches: u64,
+    /// Human-readable reason recorded for the last mismatched pull sample.
+    pub last_mismatch_reason: Option<String>,
 }
 
 struct ListenerRegistration {
@@ -315,7 +395,7 @@ impl UZeroCopyTransportImpl for UTransportLola {
                     return Ok(frame);
                 }
                 drop(pending);
-                self.queue_pull_sample(frame).await;
+                self.queue_pull_sample(frame).await?;
                 pending = self.pending.lock().await;
             }
             Err(UStatus::fail_with_code(
@@ -329,7 +409,7 @@ impl UZeroCopyTransportImpl for UTransportLola {
             if frame_matches(&sample, source_filter, sink_filter) {
                 return Ok(sample);
             }
-            self.queue_pull_sample(sample).await;
+            self.queue_pull_sample(sample).await?;
         }
     }
 
@@ -542,6 +622,9 @@ mod tests {
             sample_size: 512,
             sample_alignment: 8,
             max_samples: 4,
+            pull_mismatch_queue_capacity: LolaTransportConfig::DEFAULT_PULL_MISMATCH_QUEUE_CAPACITY,
+            pull_mismatch_queue_full_policy:
+                LolaTransportConfig::DEFAULT_PULL_MISMATCH_QUEUE_FULL_POLICY,
             mw_com_config_path: None,
         }
     }
@@ -941,8 +1024,106 @@ mod tests {
         let received_b = transport.receive_zero_copy(&topic_b, None).await.unwrap();
         assert_eq!(received_b.contiguous_payload(), b"topic-b");
 
+        let diagnostics = transport.pull_mismatch_queue_diagnostics().await;
+        assert_eq!(diagnostics.current_depth, 1);
+        assert_eq!(diagnostics.dropped_mismatches, 0);
+        assert_eq!(diagnostics.rejected_mismatches, 0);
+        assert!(diagnostics
+            .last_mismatch_reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("queued mismatched LoLa pull sample")));
+
         let received_a = transport.receive_zero_copy(&topic_a, None).await.unwrap();
         assert_eq!(received_a.contiguous_payload(), b"topic-a");
+        assert_eq!(
+            transport
+                .pull_mismatch_queue_diagnostics()
+                .await
+                .current_depth,
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn pull_mismatch_queue_drops_oldest_when_full() {
+        let transport =
+            UTransportLola::build(config().with_pull_mismatch_queue_capacity(1)).unwrap();
+        let topic_a = UUri::try_from_parts("vehicle", 0x4210, 1, 0x9013).unwrap();
+        let topic_b = UUri::try_from_parts("vehicle", 0x4210, 1, 0x9014).unwrap();
+
+        transport
+            .send_serialized_zero_copy::<RawBytes, _>(
+                deterministic_publish_metadata(topic_a.clone()),
+                &&b"oldest"[..],
+            )
+            .await
+            .unwrap();
+        transport
+            .send_serialized_zero_copy::<RawBytes, _>(
+                deterministic_publish_metadata(topic_a.clone()),
+                &&b"newest"[..],
+            )
+            .await
+            .unwrap();
+
+        let result = transport.receive_zero_copy(&topic_b, None).await;
+        assert!(result.is_err_and(|status| status.get_code() == UCode::NOT_FOUND));
+
+        let diagnostics = transport.pull_mismatch_queue_diagnostics().await;
+        assert_eq!(diagnostics.current_depth, 1);
+        assert_eq!(diagnostics.dropped_mismatches, 1);
+        assert_eq!(diagnostics.rejected_mismatches, 0);
+        assert!(diagnostics
+            .last_mismatch_reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("dropped oldest mismatched LoLa pull sample")));
+
+        let received_a = transport.receive_zero_copy(&topic_a, None).await.unwrap();
+        assert_eq!(received_a.contiguous_payload(), b"newest");
+    }
+
+    #[tokio::test]
+    async fn pull_mismatch_queue_can_reject_newest_when_full() {
+        let transport = UTransportLola::build(
+            config()
+                .with_pull_mismatch_queue_capacity(1)
+                .with_pull_mismatch_queue_full_policy(
+                    LolaPullMismatchQueueFullPolicy::RejectNewestAndReport,
+                ),
+        )
+        .unwrap();
+        let topic_a = UUri::try_from_parts("vehicle", 0x4210, 1, 0x9015).unwrap();
+        let topic_b = UUri::try_from_parts("vehicle", 0x4210, 1, 0x9016).unwrap();
+
+        transport
+            .send_serialized_zero_copy::<RawBytes, _>(
+                deterministic_publish_metadata(topic_a.clone()),
+                &&b"first"[..],
+            )
+            .await
+            .unwrap();
+        transport
+            .send_serialized_zero_copy::<RawBytes, _>(
+                deterministic_publish_metadata(topic_a.clone()),
+                &&b"second"[..],
+            )
+            .await
+            .unwrap();
+
+        let result = transport.receive_zero_copy(&topic_b, None).await;
+        assert!(result.is_err_and(|status| status.get_code() == UCode::RESOURCE_EXHAUSTED));
+
+        let diagnostics = transport.pull_mismatch_queue_diagnostics().await;
+        assert_eq!(diagnostics.current_depth, 1);
+        assert_eq!(diagnostics.dropped_mismatches, 0);
+        assert_eq!(diagnostics.rejected_mismatches, 1);
+        assert!(diagnostics
+            .last_mismatch_reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("rejected newest mismatched LoLa pull sample")));
+
+        let received_a = transport.receive_zero_copy(&topic_a, None).await.unwrap();
+        assert_eq!(received_a.contiguous_payload(), b"first");
     }
 
     #[tokio::test]
@@ -1177,6 +1358,14 @@ mod native_tests {
                 .ok()
                 .and_then(|value| value.parse().ok())
                 .unwrap_or(4),
+            pull_mismatch_queue_capacity: std::env::var(
+                "LOLA_NATIVE_TEST_PULL_MISMATCH_QUEUE_CAPACITY",
+            )
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(LolaTransportConfig::DEFAULT_PULL_MISMATCH_QUEUE_CAPACITY),
+            pull_mismatch_queue_full_policy:
+                LolaTransportConfig::DEFAULT_PULL_MISMATCH_QUEUE_FULL_POLICY,
             mw_com_config_path: Some(mw_com_config_path),
         }
     }

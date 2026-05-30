@@ -83,11 +83,15 @@ payload: no payload has no `PayloadEncoding`, while a present empty payload keep
 its encoding and reports payload presence with length zero. Payload bytes with no
 encoding are rejected before send.
 
-Filtered pull receive preserves nonmatching samples in an internal queue so a
-later matching receive call can still observe them. That queue is intentionally
-not exposed as a public API and is not currently bounded by a configurable
-resource policy; deployments with many mismatched pull filters should account for
-that residual resource risk.
+Filtered pull receive preserves nonmatching samples in a bounded internal queue
+so a later matching receive call can still observe them.
+`LolaTransportConfig::DEFAULT_PULL_MISMATCH_QUEUE_CAPACITY` is 64 retained
+mismatches. When the queue is full, the default
+`LolaPullMismatchQueueFullPolicy::DropOldestAndReport` policy keeps receive calls
+non-erroring and drops the oldest retained mismatch; applications that prefer an
+explicit receive error can select `RejectNewestAndReport`. Use
+`UTransportLola::pull_mismatch_queue_diagnostics()` to inspect current depth,
+drop/rejection counters, and the last mismatch reason.
 
 ## First-Time Build
 
@@ -196,10 +200,20 @@ The production bridge uses LoLa generic APIs:
 
 This avoids generated type bindings and maps uProtocol frame bytes into fixed-size LoLa event samples.
 
-The bridge exposes the LoLa event slot's raw sample storage to Rust. S-CORE's current generic skeleton allocation path returns an owning loan whose pointer can reference the generic `EventDataStorage` object base, while the generic proxy receives bytes from the raw event slot array. The bridge keeps the original loan for `Send` ownership but writes frame bytes through `EventDataStorage::data()` so TX and RX use the same sample storage.
+The bridge exposes the LoLa event slot's raw sample storage to Rust. This raw
+slot mapping is pinned to Eclipse S-CORE communication commit
+`56c36d4059d276e804c143d14012576ddf1b9e25`. At that commit,
+`score/mw/com/impl/bindings/lola/generic_skeleton_event.h` routes
+`GenericSkeletonEvent::Allocate()` through the generic `SampleAllocateePtr<void>`
+abstraction, `score/mw/com/impl/bindings/lola/event_data_storage.h` stores event
+slots in `EventDataStorage::data()`, and
+`score/mw/com/impl/bindings/lola/generic_proxy_event.h` receives raw slot samples
+from that data array. The bridge keeps the original loan for `Send` ownership but
+writes frame bytes through `EventDataStorage::data()` so TX and RX use the same
+sample storage.
 
 Rust reports LoLa payload provenance as `OpaqueTransportLoan`. The path is still a
-native loan-backed LoLa sample path, but the Rust binding does not currently have
+native loan-backed LoLa sample path, but this binding intentionally does not claim
 a transport-independent proof that the S-CORE allocation is a shareable memory
 region with stronger `PayloadLoanProvenance::SharedMemory` semantics.
 

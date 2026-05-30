@@ -14,6 +14,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cstdint>
 #include <cstdlib>
 #include <fstream>
 #include <limits>
@@ -91,12 +92,38 @@ std::optional<std::size_t> align_up(const std::size_t value, const std::size_t a
     return value + padding;
 }
 
+bool is_supported_sample_alignment(const std::size_t alignment)
+{
+    return is_power_of_two(alignment) && alignment <= alignof(std::max_align_t);
+}
+
+bool pointer_is_aligned(const void* const ptr, const std::size_t alignment)
+{
+    if (ptr == nullptr || !is_supported_sample_alignment(alignment))
+    {
+        return false;
+    }
+    return (reinterpret_cast<std::uintptr_t>(ptr) % alignment) == 0U;
+}
+
+bool checked_multiply(const std::size_t lhs, const std::size_t rhs, std::size_t& result)
+{
+    if (lhs != 0U && rhs > std::numeric_limits<std::size_t>::max() / lhs)
+    {
+        return false;
+    }
+    result = lhs * rhs;
+    return true;
+}
+
 std::uint8_t* generic_sample_data(SampleAllocateePtr<void>& sample,
                                   const std::size_t sample_size,
-                                  const std::size_t sample_alignment)
+                                  const std::size_t sample_alignment,
+                                  const std::size_t max_samples)
 {
     auto* const skeleton_sample_ptr = static_cast<std::uint8_t*>(sample.Get());
-    if (skeleton_sample_ptr == nullptr)
+    if (skeleton_sample_ptr == nullptr || sample_size == 0U || max_samples == 0U ||
+        !is_supported_sample_alignment(sample_alignment))
     {
         return nullptr;
     }
@@ -105,7 +132,7 @@ std::uint8_t* generic_sample_data(SampleAllocateePtr<void>& sample,
     const auto* const lola_sample = sample_view.As<score::mw::com::impl::lola::SampleAllocateePtr<void>>();
     if (lola_sample == nullptr)
     {
-        return skeleton_sample_ptr;
+        return pointer_is_aligned(skeleton_sample_ptr, sample_alignment) ? skeleton_sample_ptr : nullptr;
     }
 
     const auto aligned_sample_size = align_up(sample_size, sample_alignment);
@@ -113,19 +140,47 @@ std::uint8_t* generic_sample_data(SampleAllocateePtr<void>& sample,
     {
         return nullptr;
     }
+    std::size_t total_storage_size{0U};
+    if (!checked_multiply(aligned_sample_size.value(), max_samples, total_storage_size))
+    {
+        return nullptr;
+    }
     const auto slot_index = static_cast<std::size_t>(lola_sample->GetReferencedSlot());
-    if (slot_index > std::numeric_limits<std::size_t>::max() / aligned_sample_size.value())
+    if (slot_index >= max_samples || slot_index > std::numeric_limits<std::size_t>::max() / aligned_sample_size.value())
     {
         return nullptr;
     }
 
-    // GenericSkeletonEvent::Allocate() currently returns the EventDataStorage object base, while GenericProxyEvent
-    // reads from EventMetaInfo::event_slots_raw_array_ (EventDataStorage::data()). Keep the loan object untouched for
-    // Send(), but expose the raw slot storage to Rust so producer and consumer use the same sample bytes.
+    // S-CORE communication commit 56c36d4059d276e804c143d14012576ddf1b9e25:
+    // - score/mw/com/impl/bindings/lola/generic_skeleton_event.h routes GenericSkeletonEvent::Allocate()
+    //   through the generic SampleAllocateePtr<void> abstraction used here.
+    // - score/mw/com/impl/bindings/lola/event_data_storage.h stores event slots in EventDataStorage::data().
+    // - score/mw/com/impl/bindings/lola/generic_proxy_event.h receives raw slot samples from that data array.
+    // Keep the owning loan object untouched for Send(), but expose the raw slot storage to Rust so producer and
+    // consumer use the same sample bytes.
     const auto slot_offset = slot_index * aligned_sample_size.value();
-    auto* const storage = reinterpret_cast<EventDataStorage<std::max_align_t>*>(skeleton_sample_ptr - slot_offset);
+    if (slot_offset > total_storage_size || sample_size > total_storage_size - slot_offset)
+    {
+        return nullptr;
+    }
+    const auto skeleton_sample_address = reinterpret_cast<std::uintptr_t>(skeleton_sample_ptr);
+    if (skeleton_sample_address < slot_offset)
+    {
+        return nullptr;
+    }
+    auto* const storage = reinterpret_cast<EventDataStorage<std::max_align_t>*>(skeleton_sample_address - slot_offset);
     auto* const raw_slots = reinterpret_cast<std::uint8_t*>(storage->data());
-    return raw_slots + slot_offset;
+    if (raw_slots == nullptr)
+    {
+        return nullptr;
+    }
+    const auto raw_slots_address = reinterpret_cast<std::uintptr_t>(raw_slots);
+    if (slot_offset > std::numeric_limits<std::uintptr_t>::max() - raw_slots_address)
+    {
+        return nullptr;
+    }
+    auto* const raw_slot = reinterpret_cast<std::uint8_t*>(raw_slots_address + slot_offset);
+    return pointer_is_aligned(raw_slot, sample_alignment) ? raw_slot : nullptr;
 }
 
 std::optional<std::string> sibling_logging_config_path(const std::string& config_path);
@@ -231,6 +286,7 @@ struct UpLolaTxLoan
 struct UpLolaRxSample
 {
     SamplePtr<void> sample;
+    const std::uint8_t* sample_data{nullptr};
     std::size_t sample_size{0U};
     RxSamplePool* pool{nullptr};
     std::size_t pool_index{0U};
@@ -269,6 +325,7 @@ struct TxLoanPool
             if (!slot.in_use)
             {
                 slot.in_use = true;
+                slot.pool = this;
                 slot.sample_data = nullptr;
                 slot.sample_size = 0U;
                 add_ref();
@@ -284,14 +341,24 @@ struct TxLoanPool
         {
             return;
         }
+        bool was_in_use{false};
         {
             std::lock_guard<std::mutex> lock{mutex};
+            if (!loan->in_use)
+            {
+                return;
+            }
+            was_in_use = true;
             loan->sample = SampleAllocateePtr<void>{};
             loan->sample_data = nullptr;
             loan->sample_size = 0U;
+            loan->pool = nullptr;
             loan->in_use = false;
         }
-        release_ref();
+        if (was_in_use)
+        {
+            release_ref();
+        }
     }
 
     std::mutex mutex;
@@ -331,6 +398,8 @@ struct RxSamplePool
             if (!slot.in_use)
             {
                 slot.in_use = true;
+                slot.pool = this;
+                slot.sample_data = nullptr;
                 slot.sample_size = 0U;
                 add_ref();
                 return &slot;
@@ -345,13 +414,24 @@ struct RxSamplePool
         {
             return;
         }
+        bool was_in_use{false};
         {
             std::lock_guard<std::mutex> lock{mutex};
+            if (!sample->in_use)
+            {
+                return;
+            }
+            was_in_use = true;
             sample->sample = SamplePtr<void>{};
+            sample->sample_data = nullptr;
             sample->sample_size = 0U;
+            sample->pool = nullptr;
             sample->in_use = false;
         }
-        release_ref();
+        if (was_in_use)
+        {
+            release_ref();
+        }
     }
 
     std::mutex mutex;
@@ -446,6 +526,7 @@ struct UpLolaSubscriber
     std::string instance_specifier;
     std::string event_name;
     std::size_t sample_size;
+    std::size_t sample_alignment;
     std::size_t max_samples;
     std::mutex mutex;
     std::optional<GenericProxy> proxy;
@@ -517,7 +598,7 @@ struct UpLolaSubscriber
 UpLolaStatusCode up_lola_transport_create(const UpLolaConfig* config, UpLolaTransport** out_transport)
 {
     if (config == nullptr || out_transport == nullptr || config->sample_size == 0U ||
-        !is_power_of_two(config->sample_alignment) || config->max_samples == 0U)
+        !is_supported_sample_alignment(config->sample_alignment) || config->max_samples == 0U)
     {
         return UP_LOLA_STATUS_INVALID_ARGUMENT;
     }
@@ -626,7 +707,8 @@ UpLolaStatusCode up_lola_transport_reserve(UpLolaTransport* transport, UpLolaTxL
 
     loan->sample = std::move(sample_result).value();
     loan->sample_size = transport->sample_size;
-    loan->sample_data = generic_sample_data(loan->sample, transport->sample_size, transport->sample_alignment);
+    loan->sample_data = generic_sample_data(
+        loan->sample, transport->sample_size, transport->sample_alignment, transport->max_samples);
     if (loan->sample_data == nullptr)
     {
         loan->pool->release(loan);
@@ -638,7 +720,7 @@ UpLolaStatusCode up_lola_transport_reserve(UpLolaTransport* transport, UpLolaTxL
 
 std::uint8_t* up_lola_tx_loan_data(UpLolaTxLoan* loan)
 {
-    if (loan == nullptr || !loan->sample)
+    if (loan == nullptr || !loan->in_use || loan->sample_data == nullptr || !loan->sample)
     {
         return nullptr;
     }
@@ -647,7 +729,7 @@ std::uint8_t* up_lola_tx_loan_data(UpLolaTxLoan* loan)
 
 std::size_t up_lola_tx_loan_size(const UpLolaTxLoan* loan)
 {
-    return loan == nullptr ? 0U : loan->sample_size;
+    return loan == nullptr || !loan->in_use ? 0U : loan->sample_size;
 }
 
 void up_lola_tx_loan_destroy(UpLolaTxLoan* loan)
@@ -660,7 +742,8 @@ void up_lola_tx_loan_destroy(UpLolaTxLoan* loan)
 
 UpLolaStatusCode up_lola_transport_send(UpLolaTransport* transport, UpLolaTxLoan* loan)
 {
-    if (transport == nullptr || loan == nullptr || transport->skeleton_event == nullptr || !loan->sample)
+    if (transport == nullptr || loan == nullptr || transport->skeleton_event == nullptr || !loan->in_use ||
+        loan->pool != transport->tx_pool || loan->sample_data == nullptr || !loan->sample)
     {
         return UP_LOLA_STATUS_INVALID_ARGUMENT;
     }
@@ -713,14 +796,21 @@ UpLolaStatusCode up_lola_transport_receive(UpLolaTransport* transport, UpLolaRxS
         return UP_LOLA_STATUS_RESOURCE_EXHAUSTED;
     }
     sample->sample = std::move(received_sample);
+    sample->sample_data = static_cast<const std::uint8_t*>(sample->sample.Get());
     sample->sample_size = transport->sample_size;
+    if (sample->sample_data == nullptr || !pointer_is_aligned(sample->sample_data, transport->sample_alignment))
+    {
+        sample->pool->release(sample);
+        return UP_LOLA_STATUS_INTERNAL;
+    }
     *out_sample = sample;
     return UP_LOLA_STATUS_OK;
 }
 
 UpLolaStatusCode up_lola_subscriber_create(const UpLolaConfig* config, UpLolaSubscriber** out_subscriber)
 {
-    if (config == nullptr || out_subscriber == nullptr || config->sample_size == 0U || config->max_samples == 0U)
+    if (config == nullptr || out_subscriber == nullptr || config->sample_size == 0U ||
+        !is_supported_sample_alignment(config->sample_alignment) || config->max_samples == 0U)
     {
         return UP_LOLA_STATUS_INVALID_ARGUMENT;
     }
@@ -745,6 +835,7 @@ UpLolaStatusCode up_lola_subscriber_create(const UpLolaConfig* config, UpLolaSub
     subscriber->instance_specifier = std::move(*instance_specifier);
     subscriber->event_name = std::move(*event_name);
     subscriber->sample_size = config->sample_size;
+    subscriber->sample_alignment = config->sample_alignment;
     subscriber->max_samples = config->max_samples;
     subscriber->rx_pool = new RxSamplePool{config->max_samples};
 
@@ -813,23 +904,29 @@ UpLolaStatusCode up_lola_subscriber_receive(UpLolaSubscriber* subscriber, UpLola
         return UP_LOLA_STATUS_RESOURCE_EXHAUSTED;
     }
     sample->sample = std::move(received_sample);
+    sample->sample_data = static_cast<const std::uint8_t*>(sample->sample.Get());
     sample->sample_size = subscriber->sample_size;
+    if (sample->sample_data == nullptr || !pointer_is_aligned(sample->sample_data, subscriber->sample_alignment))
+    {
+        sample->pool->release(sample);
+        return UP_LOLA_STATUS_INTERNAL;
+    }
     *out_sample = sample;
     return UP_LOLA_STATUS_OK;
 }
 
 const std::uint8_t* up_lola_rx_sample_data(const UpLolaRxSample* sample)
 {
-    if (sample == nullptr || !sample->sample)
+    if (sample == nullptr || !sample->in_use || sample->sample_data == nullptr || !sample->sample)
     {
         return nullptr;
     }
-    return static_cast<const std::uint8_t*>(sample->sample.Get());
+    return sample->sample_data;
 }
 
 std::size_t up_lola_rx_sample_size(const UpLolaRxSample* sample)
 {
-    return sample == nullptr ? 0U : sample->sample_size;
+    return sample == nullptr || !sample->in_use ? 0U : sample->sample_size;
 }
 
 void up_lola_rx_sample_destroy(UpLolaRxSample* sample)

@@ -95,7 +95,8 @@ pub struct UpLolaRxSample {
 // - These declarations must exactly match the native LoLa bridge ABI for opaque
 //   handles, pointer mutability, and out-parameter ownership transfer.
 // - Rust wrappers check null out-parameters before constructing `NonNull` and
-//   tie borrowed slices to `NativeTxLoan`/`NativeRxSample` wrapper lifetimes.
+//   check bridge data pointers, lengths, and configured alignment before
+//   constructing slices tied to `NativeTxLoan`/`NativeRxSample` lifetimes.
 // - Thread-safety, allocation validity, and sample lifetime are external native
 //   bridge contracts; Miri cannot execute or prove these FFI calls.
 unsafe extern "C" {
@@ -135,6 +136,8 @@ unsafe extern "C" {
 
 pub(crate) struct NativeTransport {
     ptr: NonNull<UpLolaTransport>,
+    sample_size: usize,
+    sample_alignment: usize,
 }
 
 // SAFETY: The native bridge contract treats `UpLolaTransport` handles as
@@ -159,7 +162,11 @@ impl NativeTransport {
         let ptr = NonNull::new(out).ok_or_else(|| {
             UStatus::fail_with_code(UCode::INTERNAL, "LoLa bridge returned null transport")
         })?;
-        Ok(Self { ptr })
+        Ok(Self {
+            ptr,
+            sample_size: config.sample_size,
+            sample_alignment: config.sample_alignment,
+        })
     }
 
     pub(crate) fn loan_sample(&self) -> Result<NativeTxLoan, UStatus> {
@@ -168,7 +175,7 @@ impl NativeTransport {
         // `out` is a valid out-parameter for one TX loan handle.
         let status = unsafe { up_lola_transport_reserve(self.ptr.as_ptr(), &raw mut out) };
         map_status(status, "loan LoLa sample")?;
-        NativeTxLoan::new(out)
+        NativeTxLoan::new(out, self.sample_size, self.sample_alignment)
     }
 
     pub(crate) fn send(&self, mut loan: NativeTxLoan) -> Result<(), UStatus> {
@@ -190,6 +197,8 @@ impl Drop for NativeTransport {
 
 pub(crate) struct NativeSubscriber {
     ptr: NonNull<UpLolaSubscriber>,
+    sample_size: usize,
+    sample_alignment: usize,
 }
 
 // SAFETY: The native bridge treats subscriber handles as thread-safe opaque
@@ -210,7 +219,11 @@ impl NativeSubscriber {
         let ptr = NonNull::new(out).ok_or_else(|| {
             UStatus::fail_with_code(UCode::INTERNAL, "LoLa bridge returned null subscriber")
         })?;
-        Ok(Self { ptr })
+        Ok(Self {
+            ptr,
+            sample_size: config.sample_size,
+            sample_alignment: config.sample_alignment,
+        })
     }
 
     pub(crate) fn receive(&self) -> Result<NativeRxSample, UStatus> {
@@ -219,7 +232,7 @@ impl NativeSubscriber {
         // out-parameter for one received sample handle.
         let status = unsafe { up_lola_subscriber_receive(self.ptr.as_ptr(), &raw mut out) };
         map_status(status, "receive LoLa sample")?;
-        NativeRxSample::new(out)
+        NativeRxSample::new(out, self.sample_size, self.sample_alignment)
     }
 }
 
@@ -233,6 +246,8 @@ impl Drop for NativeSubscriber {
 
 pub(crate) struct NativeTxLoan {
     ptr: Option<NonNull<UpLolaTxLoan>>,
+    expected_len: usize,
+    expected_alignment: usize,
 }
 
 // SAFETY: TX loan ownership moves between threads only as an opaque handle; the
@@ -240,11 +255,21 @@ pub(crate) struct NativeTxLoan {
 unsafe impl Send for NativeTxLoan {}
 
 impl NativeTxLoan {
-    fn new(ptr: *mut UpLolaTxLoan) -> Result<Self, UStatus> {
+    fn new(
+        ptr: *mut UpLolaTxLoan,
+        expected_len: usize,
+        expected_alignment: usize,
+    ) -> Result<Self, UStatus> {
         let ptr = NonNull::new(ptr).ok_or_else(|| {
             UStatus::fail_with_code(UCode::INTERNAL, "LoLa bridge returned null TX loan")
         })?;
-        Ok(Self { ptr: Some(ptr) })
+        let loan = Self {
+            ptr: Some(ptr),
+            expected_len,
+            expected_alignment,
+        };
+        loan.data_parts("LoLa TX loan")?;
+        Ok(loan)
     }
 
     fn take(&mut self) -> NonNull<UpLolaTxLoan> {
@@ -254,21 +279,35 @@ impl NativeTxLoan {
     }
 
     pub(crate) fn len(&self) -> usize {
-        let ptr = self.ptr.expect("LoLa TX loan is still owned");
-        // SAFETY: `ptr` is a live TX loan handle still owned by this wrapper.
-        unsafe { up_lola_tx_loan_size(ptr.as_ptr()) }
+        self.data_parts("LoLa TX loan")
+            .expect("LoLa TX loan data should remain valid while owned")
+            .1
     }
 
-    pub(crate) fn as_slice(&self) -> &[u8] {
+    fn data_parts(&self, label: &str) -> Result<(*mut u8, usize), UStatus> {
         let ptr = self.ptr.expect("LoLa TX loan is still owned");
-        // SAFETY: `ptr` is a live TX loan handle. The bridge returns a pointer
-        // to `len` initialized bytes valid for the loan lifetime.
+        // SAFETY: `ptr` is a live TX loan handle still owned by this wrapper.
         let data = unsafe { up_lola_tx_loan_data(ptr.as_ptr()) };
         // SAFETY: `ptr` is the same live TX loan handle as above.
         let len = unsafe { up_lola_tx_loan_size(ptr.as_ptr()) };
+        validate_sample_parts(
+            data.cast_const(),
+            len,
+            self.expected_len,
+            self.expected_alignment,
+            label,
+        )?;
+        Ok((data, len))
+    }
+
+    pub(crate) fn as_slice(&self) -> &[u8] {
+        let (data, len) = self
+            .data_parts("LoLa TX loan")
+            .expect("LoLa TX loan data should remain valid while owned");
         // SAFETY:
-        // - The native bridge supplies a non-null pointer to `len` initialized
-        //   bytes in one live TX loan allocation.
+        // - `data_parts` rejected null pointers, lengths other than the configured
+        //   sample size, and pointers that do not satisfy the configured sample alignment.
+        // - The native bridge supplies one live TX loan allocation for the wrapper lifetime.
         // - Per https://doc.rust-lang.org/stable/std/slice/fn.from_raw_parts.html#safety:
         //
         //   "`data` must be non-null, valid for reads for
@@ -279,15 +318,14 @@ impl NativeTxLoan {
     }
 
     pub(crate) fn as_mut_slice(&mut self) -> &mut [u8] {
-        let ptr = self.ptr.expect("LoLa TX loan is still owned");
-        // SAFETY: `ptr` is a live TX loan handle exclusively borrowed through
-        // `&mut self`; the bridge returns the mutable sample data pointer.
-        let data = unsafe { up_lola_tx_loan_data(ptr.as_ptr()) };
-        // SAFETY: `ptr` is the same live TX loan handle as above.
-        let len = unsafe { up_lola_tx_loan_size(ptr.as_ptr()) };
+        let (data, len) = self
+            .data_parts("LoLa TX loan")
+            .expect("LoLa TX loan data should remain valid while owned");
         // SAFETY:
-        // - The bridge guarantees `data..data+len` is one valid mutable loan
-        //   allocation for initialized `u8` bytes while `&mut self` is held.
+        // - `data_parts` rejected null pointers, lengths other than the configured
+        //   sample size, and pointers that do not satisfy the configured sample alignment.
+        // - The bridge guarantees `data..data+len` is one valid mutable loan allocation
+        //   for initialized `u8` bytes while `&mut self` is held.
         // - Per https://doc.rust-lang.org/stable/std/slice/fn.from_raw_parts_mut.html#safety:
         //
         //   "`data` must be non-null, valid for both reads and writes for
@@ -298,13 +336,12 @@ impl NativeTxLoan {
     }
 
     pub(crate) fn as_uninit_slice(&mut self) -> &mut [MaybeUninit<u8>] {
-        let ptr = self.ptr.expect("LoLa TX loan is still owned");
-        // SAFETY: `ptr` is a live TX loan handle exclusively borrowed through
-        // `&mut self`; the bridge returns the mutable sample data pointer.
-        let data = unsafe { up_lola_tx_loan_data(ptr.as_ptr()) };
-        // SAFETY: `ptr` is the same live TX loan handle as above.
-        let len = unsafe { up_lola_tx_loan_size(ptr.as_ptr()) };
+        let (data, len) = self
+            .data_parts("LoLa TX loan")
+            .expect("LoLa TX loan data should remain valid while owned");
         // SAFETY:
+        // - `data_parts` rejected null pointers, lengths other than the configured
+        //   sample size, and pointers that do not satisfy the configured sample alignment.
         // - The bridge provides one mutable loan allocation for `len` bytes.
         // - Per https://doc.rust-lang.org/stable/std/mem/union.MaybeUninit.html#layout-1:
         //
@@ -330,6 +367,8 @@ impl Drop for NativeTxLoan {
 
 pub(crate) struct NativeRxSample {
     ptr: NonNull<UpLolaRxSample>,
+    expected_len: usize,
+    expected_alignment: usize,
 }
 
 // SAFETY: RX sample ownership moves as an opaque handle; the bridge owns the
@@ -337,29 +376,82 @@ pub(crate) struct NativeRxSample {
 unsafe impl Send for NativeRxSample {}
 
 impl NativeRxSample {
-    fn new(ptr: *mut UpLolaRxSample) -> Result<Self, UStatus> {
+    fn new(
+        ptr: *mut UpLolaRxSample,
+        expected_len: usize,
+        expected_alignment: usize,
+    ) -> Result<Self, UStatus> {
         let ptr = NonNull::new(ptr).ok_or_else(|| {
             UStatus::fail_with_code(UCode::INTERNAL, "LoLa bridge returned null RX sample")
         })?;
-        Ok(Self { ptr })
+        let sample = Self {
+            ptr,
+            expected_len,
+            expected_alignment,
+        };
+        sample.data_parts("LoLa RX sample")?;
+        Ok(sample)
     }
 
-    pub(crate) fn as_slice(&self) -> &[u8] {
+    fn data_parts(&self, label: &str) -> Result<(*const u8, usize), UStatus> {
         // SAFETY: `self.ptr` is a live RX sample handle owned by this wrapper;
         // the bridge returns a pointer to initialized sample bytes.
         let data = unsafe { up_lola_rx_sample_data(self.ptr.as_ptr()) };
         // SAFETY: `self.ptr` is the same live RX sample handle as above.
         let len = unsafe { up_lola_rx_sample_size(self.ptr.as_ptr()) };
+        validate_sample_parts(data, len, self.expected_len, self.expected_alignment, label)?;
+        Ok((data, len))
+    }
+
+    pub(crate) fn as_slice(&self) -> &[u8] {
+        let (data, len) = self
+            .data_parts("LoLa RX sample")
+            .expect("LoLa RX sample data should remain valid while owned");
         // SAFETY:
-        // - The bridge guarantees the returned sample data pointer is non-null,
-        //   aligned, and valid for `len` initialized `u8` elements for the
-        //   lifetime of this RX sample wrapper.
+        // - `data_parts` rejected null pointers, lengths other than the configured
+        //   sample size, and pointers that do not satisfy the configured sample alignment.
+        // - The bridge guarantees the returned sample data pointer is valid for `len`
+        //   initialized `u8` elements for the lifetime of this RX sample wrapper.
         // - Per https://doc.rust-lang.org/stable/std/slice/fn.from_raw_parts.html#safety:
         //
         //   "`data` must point to `len` consecutive properly initialized values
         //   of type `T`" and the whole range must be contained in one allocation.
         unsafe { slice::from_raw_parts(data, len) }
     }
+}
+
+fn validate_sample_parts(
+    data: *const u8,
+    len: usize,
+    expected_len: usize,
+    expected_alignment: usize,
+    label: &str,
+) -> Result<(), UStatus> {
+    if data.is_null() {
+        return Err(UStatus::fail_with_code(
+            UCode::INTERNAL,
+            format!("{label} data pointer is null"),
+        ));
+    }
+    if len != expected_len {
+        return Err(UStatus::fail_with_code(
+            UCode::INTERNAL,
+            format!("{label} length {len} does not match configured sample size {expected_len}"),
+        ));
+    }
+    if expected_alignment == 0 || !expected_alignment.is_power_of_two() {
+        return Err(UStatus::fail_with_code(
+            UCode::INTERNAL,
+            format!("{label} has invalid configured sample alignment {expected_alignment}"),
+        ));
+    }
+    if !(data as usize).is_multiple_of(expected_alignment) {
+        return Err(UStatus::fail_with_code(
+            UCode::INTERNAL,
+            format!("{label} data pointer does not satisfy configured sample alignment {expected_alignment}"),
+        ));
+    }
+    Ok(())
 }
 
 impl Drop for NativeRxSample {
