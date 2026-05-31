@@ -1125,6 +1125,8 @@ dependencies = [
  "async-trait",
  "criterion",
  "protobuf",
+ "protobuf-codegen",
+ "protoc-bin-vendored",
  "serde_json",
  "tokio",
  "up-rust",

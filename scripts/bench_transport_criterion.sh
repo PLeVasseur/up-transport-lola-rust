@@ -16,6 +16,7 @@ CRITERION_ARGS="${CRITERION_ARGS:-$DEFAULT_CRITERION_ARGS}"
 LARGE_SENSOR_CRITERION_ARGS="${LARGE_SENSOR_CRITERION_ARGS:-$DEFAULT_LARGE_SENSOR_CRITERION_ARGS}"
 BENCH_PIN_PREFIX="${BENCH_PIN_PREFIX:-}"
 TRANSPORT_BENCH_PROFILE="${TRANSPORT_BENCH_PROFILE:-all}"
+TRANSPORT_BENCH_SUITE="${TRANSPORT_BENCH_SUITE:-raw}"
 TRANSPORT_BENCH_REPORT_DIR="${TRANSPORT_BENCH_REPORT_DIR:-$DEFAULT_REPORT_DIR}"
 LOLA_BENCH_BACKEND="${LOLA_BENCH_BACKEND:-native}"
 
@@ -26,6 +27,8 @@ Usage:
   scripts/bench_transport_criterion.sh candidate <phase_candidate>
   scripts/bench_transport_criterion.sh guardrail <phase_candidate> <report_path>
   scripts/bench_transport_criterion.sh export
+
+Set TRANSPORT_BENCH_SUITE=raw, payload-contract, or all. The default is raw.
 
 Set LOLA_BENCH_BACKEND=test-stub for correctness-only smoke with
 --no-default-features --features "test-stub benchmark-owned".
@@ -38,7 +41,19 @@ run_cargo_bench() {
     local profile="$1"
     local criterion_args="$2"
     local set_profile=false
+    local cargo_features="benchmark-owned"
     shift 2
+
+    case "$TRANSPORT_BENCH_SUITE" in
+        raw) ;;
+        payload-contract|all)
+            cargo_features="$cargo_features payload-contract-benchmarks"
+            ;;
+        *)
+            echo "TRANSPORT_BENCH_SUITE must be one of raw, payload-contract, all" >&2
+            exit 2
+            ;;
+    esac
 
     if [[ -z "${LOLA_BENCH_PROFILE+x}" ]]; then
         export LOLA_BENCH_PROFILE="$profile"
@@ -47,15 +62,15 @@ run_cargo_bench() {
     if [[ -n "$BENCH_PIN_PREFIX" ]]; then
         read -r -a pin_parts <<<"$BENCH_PIN_PREFIX"
         if [[ "$LOLA_BENCH_BACKEND" == "test-stub" ]]; then
-            "${pin_parts[@]}" cargo bench --no-default-features --features "test-stub benchmark-owned" --bench transport_criterion -- $criterion_args "$@"
+            TRANSPORT_BENCH_SUITE="$TRANSPORT_BENCH_SUITE" "${pin_parts[@]}" cargo bench --no-default-features --features "test-stub $cargo_features" --bench transport_criterion -- $criterion_args "$@"
         else
-            "${pin_parts[@]}" cargo bench --features benchmark-owned --bench transport_criterion -- $criterion_args "$@"
+            TRANSPORT_BENCH_SUITE="$TRANSPORT_BENCH_SUITE" "${pin_parts[@]}" cargo bench --features "$cargo_features" --bench transport_criterion -- $criterion_args "$@"
         fi
     else
         if [[ "$LOLA_BENCH_BACKEND" == "test-stub" ]]; then
-            cargo bench --no-default-features --features "test-stub benchmark-owned" --bench transport_criterion -- $criterion_args "$@"
+            TRANSPORT_BENCH_SUITE="$TRANSPORT_BENCH_SUITE" cargo bench --no-default-features --features "test-stub $cargo_features" --bench transport_criterion -- $criterion_args "$@"
         else
-            cargo bench --features benchmark-owned --bench transport_criterion -- $criterion_args "$@"
+            TRANSPORT_BENCH_SUITE="$TRANSPORT_BENCH_SUITE" cargo bench --features "$cargo_features" --bench transport_criterion -- $criterion_args "$@"
         fi
     fi
     if [[ "$set_profile" == true ]]; then
@@ -105,6 +120,7 @@ write_summary() {
 - CPU: \`$cpu_model\`
 - Core Criterion args: \`$CRITERION_ARGS\`
 - Large sensor Criterion args: \`$LARGE_SENSOR_CRITERION_ARGS\`
+- Suite: \`$TRANSPORT_BENCH_SUITE\`
 - Pinning prefix: \`${BENCH_PIN_PREFIX:-none}\`
 
 ## Methodology
@@ -112,6 +128,10 @@ write_summary() {
 The \`owned\` path uses \`BenchmarkOwnedLolaTransport\`, a benchmark-only wrapper behind \`benchmark-owned\` that copies owned frame payload bytes into LoLa's own transmit loans and copies receive leases back into owned frames. It is not the generic copying adapter and is not a product-facing owned API.
 
 The headline comparator is \`owned\` vs \`zero_copy_loan_copy\`. The \`zero_copy_uninit_direct\` path is supporting best-case direct true-zero-copy transmit data.
+
+Payload-contract suite: \`protobuf_owned_full\` constructs generated protobuf \`BenchPayload\`, serializes through \`ProtobufPayload\`, sends over \`BenchmarkOwnedLolaTransport\`, receives owned bytes, deserializes, and validates scalar fields plus representative payload bytes. \`stable_zc_nozero_full\` initializes nested \`StableBenchPayloadN\` structs directly in zero-copy loan storage with compile-time checked no-zero \`StablePayloadInit\`, receives a loan-backed frame, borrows the stable typed view, and validates the same public payload contract.
+
+Payload-contract transported bytes are intentionally contract-specific: protobuf reports encoded \`BenchPayload\` bytes, while stable reports \`size_of::<StableBenchPayloadN>()\` (logical payload bytes plus a 16-byte header/checksum). This is application payload-contract data, not RawBytes transport-boundary data.
 
 Core payload cases: \`empty_present\` 0 B, \`can_classic_max\` 8 B, \`can_fd_max\` 64 B, \`someip_single_mtu\` 1456 B, \`streamer_4k\` 4096 B, \`radar_ars548_detection_list\` 35336 B, and \`streamer_64k\` 65536 B.
 
@@ -123,7 +143,7 @@ Use \`bench-data/criterion-compare-bencher.txt\` and \`criterion-html/\` for exp
 
 ## Caveats
 
-Native LoLa performance requires S-CORE LoLa runtime support and the repo-owned benchmark fixtures under \`benches/fixtures/\`. The harness fails before Criterion measurement if native fixture identity, capacity, warm round trip, or selected-profile fit checks fail.
+Native LoLa performance requires S-CORE LoLa runtime support and the repo-owned benchmark fixtures under \`benches/fixtures/\`. Payload-contract v1 is Publish-only and does not replace the existing RawBytes transport-boundary matrix. The harness fails before Criterion measurement if native fixture identity, capacity, warm round trip, or selected-profile fit checks fail.
 SUMMARY
 }
 
