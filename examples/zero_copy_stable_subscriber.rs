@@ -12,12 +12,38 @@ use up_transport_lola_rust::{LolaTransportConfig, UTransportLola};
 
 #[repr(C)]
 #[derive(
-    Clone, Copy, Debug, Eq, PartialEq, up_rust::StablePayload, up_rust::ByteBackedStablePayload,
+    Clone,
+    Copy,
+    Debug,
+    Eq,
+    PartialEq,
+    up_rust::StablePayload,
+    up_rust::ByteBackedStablePayload,
+    up_rust::StablePayloadInit,
 )]
-#[stable_payload(type_name = "example.vehicle.VehiclePose")]
-struct VehiclePose {
-    x: u64,
-    y: u64,
+#[stable_payload(type_name = "org.eclipse.uprotocol.transport.example.NoZeroSensorHeader")]
+struct NoZeroSensorHeader {
+    case_id: u32,
+    sequence: u32,
+    logical_payload_len: u32,
+}
+
+#[repr(C)]
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    Eq,
+    PartialEq,
+    up_rust::StablePayload,
+    up_rust::ByteBackedStablePayload,
+    up_rust::StablePayloadInit,
+)]
+#[stable_payload(type_name = "org.eclipse.uprotocol.transport.example.NoZeroSensorFrame")]
+struct NoZeroSensorFrame {
+    header: NoZeroSensorHeader,
+    checksum: u32,
+    payload: [u8; 4096],
 }
 
 fn config() -> LolaTransportConfig {
@@ -31,7 +57,7 @@ fn config() -> LolaTransportConfig {
         sample_size: std::env::var("LOLA_SAMPLE_SIZE")
             .ok()
             .and_then(|value| value.parse().ok())
-            .unwrap_or(512),
+            .unwrap_or(8192),
         sample_alignment: std::env::var("LOLA_SAMPLE_ALIGNMENT")
             .ok()
             .and_then(|value| value.parse().ok())
@@ -60,12 +86,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     loop {
         match transport.receive_zero_copy(&source_filter, None).await {
             Ok(frame) => {
-                let pose = frame.borrow_stable_payload::<VehiclePose>()?;
+                let sensor_frame = frame.borrow_stable_payload::<NoZeroSensorFrame>()?;
                 println!(
-                    "Received LoLa stable pose [source: {}, loan provenance: {:?}, pose: {:?}]",
+                    "Received LoLa no-zero stable sensor frame [source: {}, loan provenance: {:?}, sequence: {}, first payload byte: {}]",
                     frame.metadata().source().to_uri(false),
                     frame.payload_loan_provenance()?,
-                    pose
+                    sensor_frame.header.sequence,
+                    sensor_frame.payload[0]
                 );
             }
             Err(status) if status.get_code() == UCode::NOT_FOUND => {

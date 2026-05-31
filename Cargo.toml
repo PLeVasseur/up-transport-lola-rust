@@ -26,7 +26,7 @@ required-features = ["benchmark-owned"]
 [dependencies]
 async-trait = "0.1"
 tokio = { version = "1.45.1", default-features = false, features = ["rt", "sync", "time"] }
-up-rust = { git = "https://github.com/PLeVasseur/up-rust.git", rev = "f697559e0991fee4de2a2510f13b83607a03fc2c" }
+up-rust = { git = "https://github.com/PLeVasseur/up-rust.git", rev = "3a277c0a2323376c43bf486297b6b1cdedda7a6d" }
 
 [build-dependencies]
 
@@ -35,7 +35,7 @@ criterion = { version = "0.5.1", features = ["csv_output"] }
 protobuf = { version = "3.7.2", features = ["with-bytes"] }
 serde_json = "1.0.145"
 tokio = { version = "1.45.1", default-features = false, features = ["macros", "rt"] }
-up-rust = { git = "https://github.com/PLeVasseur/up-rust.git", rev = "f697559e0991fee4de2a2510f13b83607a03fc2c", features = ["protobuf-wire", "test-util"] }
+up-rust = { git = "https://github.com/PLeVasseur/up-rust.git", rev = "3a277c0a2323376c43bf486297b6b1cdedda7a6d", features = ["protobuf-wire", "test-util"] }
 
 [package.metadata.docs.rs]
 no-default-features = true

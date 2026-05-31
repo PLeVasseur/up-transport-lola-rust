@@ -4,19 +4,43 @@
  * SPDX-License-Identifier: Apache-2.0
  ********************************************************************************/
 
-use up_rust::{
-    payload::StableContainerPayload, zero_copy::UZeroCopyUninitTransportExt, UFrameMetadata, UUri,
-};
+use up_rust::{zero_copy::UZeroCopyUninitTransportExt, UFrameMetadata, UUri};
 use up_transport_lola_rust::{LolaTransportConfig, UTransportLola};
 
 #[repr(C)]
 #[derive(
-    Clone, Copy, Debug, Eq, PartialEq, up_rust::StablePayload, up_rust::ByteBackedStablePayload,
+    Clone,
+    Copy,
+    Debug,
+    Eq,
+    PartialEq,
+    up_rust::StablePayload,
+    up_rust::ByteBackedStablePayload,
+    up_rust::StablePayloadInit,
 )]
-#[stable_payload(type_name = "example.vehicle.VehiclePose")]
-struct VehiclePose {
-    x: u64,
-    y: u64,
+#[stable_payload(type_name = "org.eclipse.uprotocol.transport.example.NoZeroSensorHeader")]
+struct NoZeroSensorHeader {
+    case_id: u32,
+    sequence: u32,
+    logical_payload_len: u32,
+}
+
+#[repr(C)]
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    Eq,
+    PartialEq,
+    up_rust::StablePayload,
+    up_rust::ByteBackedStablePayload,
+    up_rust::StablePayloadInit,
+)]
+#[stable_payload(type_name = "org.eclipse.uprotocol.transport.example.NoZeroSensorFrame")]
+struct NoZeroSensorFrame {
+    header: NoZeroSensorHeader,
+    checksum: u32,
+    payload: [u8; 4096],
 }
 
 fn config() -> LolaTransportConfig {
@@ -30,7 +54,7 @@ fn config() -> LolaTransportConfig {
         sample_size: std::env::var("LOLA_SAMPLE_SIZE")
             .ok()
             .and_then(|value| value.parse().ok())
-            .unwrap_or(512),
+            .unwrap_or(8192),
         sample_alignment: std::env::var("LOLA_SAMPLE_ALIGNMENT")
             .ok()
             .and_then(|value| value.parse().ok())
@@ -56,20 +80,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let transport = UTransportLola::build(config)?;
     let topic = UUri::try_from_parts(&authority, 0x4210, 1, 0x9000)?;
 
-    for count in 1_u64..=100 {
-        let pose = VehiclePose {
-            x: count,
-            y: count * 10,
-        };
+    for sequence in 1_u32..=100 {
+        let checksum = 0x5eed_0000 | sequence;
         println!(
-            "Publishing LoLa stable pose [topic: {}, pose: {:?}]",
+            "Publishing LoLa no-zero stable sensor frame [topic: {}, sequence: {}]",
             topic.to_uri(false),
-            pose
+            sequence
         );
         transport
-            .send_uninit_loaned_payload_as::<StableContainerPayload<VehiclePose>, VehiclePose>(
+            .send_uninit_stable_payload_as::<NoZeroSensorFrame>(
                 UFrameMetadata::try_publish(topic.clone())?,
-                |slot| Ok(slot.write(pose)),
+                |frame| {
+                    frame
+                        .header(|header| {
+                            header
+                                .case_id(1)
+                                .sequence(sequence)
+                                .logical_payload_len(4096)
+                                .finish()
+                        })?
+                        .checksum(checksum)
+                        .payload_fill(0x5a)
+                        .finish()
+                },
             )
             .await?;
         tokio::time::sleep(core::time::Duration::from_secs(1)).await;

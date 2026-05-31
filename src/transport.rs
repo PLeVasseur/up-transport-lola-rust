@@ -520,6 +520,8 @@ fn frame_matches(frame: &LolaRxLease, source_filter: &UUri, sink_filter: Option<
 
 #[cfg(all(test, feature = "test-stub", not(feature = "lola-ffi")))]
 mod tests {
+    #![allow(dead_code)]
+
     use std::{mem, sync::Arc, time::Duration};
 
     use async_trait::async_trait;
@@ -555,6 +557,42 @@ mod tests {
     struct VehiclePose {
         x: u32,
         y: u32,
+    }
+
+    #[repr(C)]
+    #[derive(
+        Clone,
+        Copy,
+        Debug,
+        Eq,
+        PartialEq,
+        up_rust::StablePayload,
+        up_rust::ByteBackedStablePayload,
+        up_rust::StablePayloadInit,
+    )]
+    #[stable_payload(type_name = "org.eclipse.uprotocol.transport.example.NoZeroSensorHeader")]
+    struct NoZeroSensorHeader {
+        case_id: u32,
+        sequence: u32,
+        logical_payload_len: u32,
+    }
+
+    #[repr(C)]
+    #[derive(
+        Clone,
+        Copy,
+        Debug,
+        Eq,
+        PartialEq,
+        up_rust::StablePayload,
+        up_rust::ByteBackedStablePayload,
+        up_rust::StablePayloadInit,
+    )]
+    #[stable_payload(type_name = "org.eclipse.uprotocol.transport.example.NoZeroSensorFrame")]
+    struct NoZeroSensorFrame {
+        header: NoZeroSensorHeader,
+        checksum: u32,
+        payload: [u8; 4096],
     }
 
     fn bytes_of_pose(pose: &VehiclePose) -> &[u8] {
@@ -786,6 +824,69 @@ mod tests {
         let pose = received.borrow_stable_payload::<VehiclePose>().unwrap();
 
         assert_eq!(pose, &VehiclePose { x: 55, y: 89 });
+    }
+
+    #[tokio::test]
+    async fn stub_backend_round_trips_no_zero_stable_payload() {
+        let mut config = config();
+        config.sample_size = 8192;
+        let transport = UTransportLola::build(config).unwrap();
+        let topic = UUri::try_from_parts("vehicle", 0x4210, 1, 0x9017).unwrap();
+
+        transport
+            .send_uninit_stable_payload_as::<NoZeroSensorFrame>(
+                deterministic_publish_metadata(topic.clone()),
+                |frame| {
+                    frame
+                        .header(|header| {
+                            header
+                                .case_id(1)
+                                .sequence(2)
+                                .logical_payload_len(4096)
+                                .finish()
+                        })?
+                        .checksum(0x5eed_cafe)
+                        .payload_fill(0x5a)
+                        .finish()
+                },
+            )
+            .await
+            .unwrap();
+
+        let mut received = None;
+        for _ in 0..100 {
+            match transport.receive_zero_copy(&topic, None).await {
+                Ok(frame) => {
+                    received = Some(frame);
+                    break;
+                }
+                Err(status) if status.get_code() == UCode::NOT_FOUND => {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+                Err(status) => panic!("unexpected LoLa receive error: {status:?}"),
+            }
+        }
+        let received = received.expect("timed out waiting for LoLa no-zero stable sample");
+        zero_copy_conformance::verify_loaned_rx_payload_layout_for(
+            &received,
+            mem::size_of::<NoZeroSensorFrame>(),
+            mem::align_of::<NoZeroSensorFrame>(),
+        )
+        .unwrap();
+        let frame = received
+            .borrow_stable_payload::<NoZeroSensorFrame>()
+            .unwrap();
+
+        assert_eq!(
+            received.metadata().encoding(),
+            Some(&StableContainerPayload::<NoZeroSensorFrame>::encoding())
+        );
+        assert_eq!(frame.header.case_id, 1);
+        assert_eq!(frame.header.sequence, 2);
+        assert_eq!(frame.header.logical_payload_len, 4096);
+        assert_eq!(frame.checksum, 0x5eed_cafe);
+        assert_eq!(frame.payload[0], 0x5a);
+        assert_eq!(frame.payload[4095], 0x5a);
     }
 
     #[tokio::test]
