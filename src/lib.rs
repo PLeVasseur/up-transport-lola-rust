@@ -42,6 +42,8 @@ compile_error!(
 
 mod config;
 mod frame;
+#[cfg(feature = "benchmark-owned")]
+mod owned_benchmark;
 mod transport;
 
 #[cfg(feature = "lola-ffi")]
@@ -49,4 +51,7 @@ mod sys;
 
 pub use config::{LolaPullMismatchQueueFullPolicy, LolaTransportConfig};
 pub use frame::{LolaRxLease, LolaTxLoan, LolaUninitTxLoan};
+#[cfg(feature = "benchmark-owned")]
+#[cfg_attr(docsrs, doc(cfg(feature = "benchmark-owned")))]
+pub use owned_benchmark::BenchmarkOwnedLolaTransport;
 pub use transport::{LolaPullMismatchQueueDiagnostics, UTransportLola};

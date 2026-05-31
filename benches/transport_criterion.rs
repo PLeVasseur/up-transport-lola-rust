@@ -1,0 +1,1039 @@
+/********************************************************************************
+ * Copyright (c) 2026 Contributors to the Eclipse Foundation
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ ********************************************************************************/
+
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::missing_panics_doc,
+    clippy::too_many_lines
+)]
+
+#[cfg(feature = "lola-ffi")]
+use std::path::Path;
+use std::{
+    cmp,
+    sync::Arc,
+    time::{Duration, Instant, SystemTime},
+};
+
+use criterion::{
+    black_box, criterion_group, criterion_main, BenchmarkGroup, BenchmarkId, Criterion,
+};
+#[cfg(feature = "lola-ffi")]
+use serde_json::Value;
+use tokio::runtime::{Builder, Runtime};
+use up_rust::{
+    payload::{PayloadLayout, RawBytes, UWireError},
+    zero_copy::{
+        LoanedUninitByteWriter, UFrameView, UTxBuffer, UTxLoanSpec, UUninitTxBuffer,
+        UZeroCopyTransport, UZeroCopyUninitTransport, UZeroCopyUninitTransportExt,
+    },
+    UFrameBuilder, UFrameMetadata, UMessageType, UOwnedFrame, UOwnedTransport, UStatus, UUri, UUID,
+};
+use up_transport_lola_rust::{BenchmarkOwnedLolaTransport, LolaTransportConfig, UTransportLola};
+
+const CORE_PAYLOAD_CASES: &[(&str, usize)] = &[
+    ("empty_present", 0),
+    ("can_classic_max", 8),
+    ("can_fd_max", 64),
+    ("someip_single_mtu", 1_456),
+    ("streamer_4k", 4 * 1_024),
+    ("radar_ars548_detection_list", 35_336),
+    ("streamer_64k", 64 * 1_024),
+];
+const LARGE_SENSOR_PAYLOAD_CASES: &[(&str, usize)] =
+    &[("camera_8mp_3840x2160_raw12_packed", 12_441_600)];
+const BENCH_TIMEOUT: Duration = Duration::from_secs(5);
+const LARGE_SENSOR_BENCH_TIMEOUT: Duration = Duration::from_secs(30);
+const DIRECT_WRITE_CHUNK: usize = 8 * 1_024;
+const UUID_LSB_BASE: u64 = 0x8000_0000_0000_0000;
+
+#[derive(Clone, Copy)]
+enum BenchProfile {
+    Core,
+    Camera,
+    All,
+}
+
+impl BenchProfile {
+    fn from_lola_env() -> Self {
+        match std::env::var("LOLA_BENCH_PROFILE")
+            .unwrap_or_else(|_| "core".to_string())
+            .as_str()
+        {
+            "core" => Self::Core,
+            "camera" => Self::Camera,
+            "all" => Self::All,
+            other => panic!("LOLA_BENCH_PROFILE must be one of core, camera, all; got {other}"),
+        }
+    }
+
+    fn includes_core(self) -> bool {
+        matches!(self, Self::Core | Self::All)
+    }
+
+    fn includes_camera(self) -> bool {
+        matches!(self, Self::Camera | Self::All)
+    }
+}
+
+#[derive(Clone, Copy)]
+enum BenchPath {
+    Owned,
+    ZeroCopyLoanCopy,
+    ZeroCopyUninitDirect,
+}
+
+impl BenchPath {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Owned => "owned",
+            Self::ZeroCopyLoanCopy => "zero_copy_loan_copy",
+            Self::ZeroCopyUninitDirect => "zero_copy_uninit_direct",
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum BenchMessageType {
+    Publish,
+    Notification,
+    Request,
+    Response,
+}
+
+impl BenchMessageType {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Publish => "publish",
+            Self::Notification => "notification",
+            Self::Request => "request",
+            Self::Response => "response",
+        }
+    }
+
+    fn message_type(self) -> UMessageType {
+        match self {
+            Self::Publish => UMessageType::Publish,
+            Self::Notification => UMessageType::Notification,
+            Self::Request => UMessageType::Request,
+            Self::Response => UMessageType::Response,
+        }
+    }
+}
+
+#[derive(Clone)]
+struct BenchCase {
+    message_type: BenchMessageType,
+    payload_case_id: &'static str,
+    payload_len: usize,
+    source: UUri,
+    sink: Option<UUri>,
+    request_id: Option<UUID>,
+}
+
+impl BenchCase {
+    fn new(
+        authority: &str,
+        message_type: BenchMessageType,
+        payload_case_id: &'static str,
+        payload_len: usize,
+    ) -> Self {
+        let sequence = next_sequence();
+        let source_resource = resource_id(0x9000, sequence);
+        let method_resource = resource_id(0x1000, sequence);
+        match message_type {
+            BenchMessageType::Publish => Self {
+                message_type,
+                payload_case_id,
+                payload_len,
+                source: uri(authority, 0x4210, source_resource),
+                sink: None,
+                request_id: None,
+            },
+            BenchMessageType::Notification => Self {
+                message_type,
+                payload_case_id,
+                payload_len,
+                source: uri(authority, 0x4211, source_resource),
+                sink: Some(uri(authority, 0x4220, 0)),
+                request_id: None,
+            },
+            BenchMessageType::Request => Self {
+                message_type,
+                payload_case_id,
+                payload_len,
+                source: uri(authority, 0x4300, 0),
+                sink: Some(uri(authority, 0x4310, method_resource)),
+                request_id: None,
+            },
+            BenchMessageType::Response => Self {
+                message_type,
+                payload_case_id,
+                payload_len,
+                source: uri(authority, 0x4310, method_resource),
+                sink: Some(uri(authority, 0x4300, 0)),
+                request_id: Some(uuid_for(sequence.saturating_add(10_000))),
+            },
+        }
+    }
+
+    fn benchmark_id(&self, path: BenchPath) -> BenchmarkId {
+        BenchmarkId::new(
+            path.label(),
+            format!(
+                "{}/{}/{}",
+                self.message_type.label(),
+                self.payload_case_id,
+                self.payload_len
+            ),
+        )
+    }
+
+    fn no_payload_benchmark_id(&self, path: BenchPath) -> BenchmarkId {
+        BenchmarkId::new(path.label(), self.message_type.label())
+    }
+
+    fn builder(&self, id: UUID) -> UFrameBuilder {
+        match self.message_type {
+            BenchMessageType::Publish => UFrameBuilder::publish(self.source.clone()),
+            BenchMessageType::Notification => UFrameBuilder::notification(
+                self.source.clone(),
+                self.sink.clone().expect("notification sink"),
+            ),
+            BenchMessageType::Request => UFrameBuilder::request(
+                self.sink.clone().expect("request method"),
+                self.source.clone(),
+                5_000,
+            ),
+            BenchMessageType::Response => UFrameBuilder::response(
+                self.sink.clone().expect("response reply-to"),
+                self.request_id.clone().expect("response request id"),
+                self.source.clone(),
+            ),
+        }
+        .with_message_id(id)
+    }
+
+    fn metadata(&self, id: UUID, payload_present: bool) -> UFrameMetadata {
+        let builder = self.builder(id);
+        if payload_present {
+            builder.with_encoding(RawBytes::encoding()).build_metadata()
+        } else {
+            builder.build_metadata()
+        }
+        .expect("valid benchmark metadata")
+    }
+
+    fn owned_frame(
+        &self,
+        id: UUID,
+        payload: &PreparedPayload,
+        payload_present: bool,
+    ) -> UOwnedFrame {
+        let builder = self.builder(id);
+        if payload_present {
+            builder
+                .build_with_raw_payload(
+                    payload.bytes().expect("precomputed payload bytes").to_vec(),
+                )
+                .expect("valid owned benchmark frame")
+        } else {
+            builder.build().expect("valid no-payload benchmark frame")
+        }
+    }
+}
+
+struct PreparedPayload {
+    bytes: Option<Vec<u8>>,
+    len: usize,
+    checksum: u64,
+}
+
+impl PreparedPayload {
+    fn precomputed(len: usize) -> Self {
+        let mut payload = vec![0_u8; len];
+        fill_pattern(&mut payload, 0);
+        Self {
+            checksum: checksum_bytes(0, &payload),
+            bytes: Some(payload),
+            len,
+        }
+    }
+
+    fn direct(len: usize) -> Self {
+        Self {
+            bytes: None,
+            len,
+            checksum: checksum_for_len(len),
+        }
+    }
+
+    fn for_path(path: BenchPath, len: usize) -> Self {
+        match path {
+            BenchPath::ZeroCopyUninitDirect => Self::direct(len),
+            BenchPath::Owned | BenchPath::ZeroCopyLoanCopy => Self::precomputed(len),
+        }
+    }
+
+    fn no_payload_for(path: BenchPath) -> Self {
+        match path {
+            BenchPath::ZeroCopyUninitDirect => Self::direct(0),
+            BenchPath::Owned | BenchPath::ZeroCopyLoanCopy => Self::precomputed(0),
+        }
+    }
+
+    fn bytes(&self) -> Option<&[u8]> {
+        self.bytes.as_deref()
+    }
+}
+
+struct ReceivedAck {
+    id: UUID,
+    message_type: UMessageType,
+    has_payload: bool,
+    payload_len: usize,
+    checksum: u64,
+}
+
+struct BenchTransports {
+    zero_copy: Arc<UTransportLola>,
+    owned: Arc<BenchmarkOwnedLolaTransport>,
+}
+
+impl BenchTransports {
+    fn build(config: LolaTransportConfig) -> Self {
+        let zero_copy =
+            UTransportLola::build(config).expect("LoLa benchmark transport should build");
+        let owned = Arc::new(BenchmarkOwnedLolaTransport::new(zero_copy.clone()));
+        Self { zero_copy, owned }
+    }
+}
+
+fn bench_payload_matrix(
+    c: &mut Criterion,
+    runtime: &Runtime,
+    transports: &BenchTransports,
+    authority: &str,
+    group_name: &'static str,
+    payload_cases: &[(&'static str, usize)],
+    timeout: Duration,
+    send_receive: bool,
+) {
+    let mut group = c.benchmark_group(group_name);
+    for (payload_case_id, payload_len) in payload_cases {
+        for path in [
+            BenchPath::Owned,
+            BenchPath::ZeroCopyLoanCopy,
+            BenchPath::ZeroCopyUninitDirect,
+        ] {
+            for message_type in [
+                BenchMessageType::Publish,
+                BenchMessageType::Notification,
+                BenchMessageType::Request,
+                BenchMessageType::Response,
+            ] {
+                let case = BenchCase::new(authority, message_type, payload_case_id, *payload_len);
+                if send_receive {
+                    bench_send_receive_case(runtime, transports, &mut group, path, case, timeout);
+                } else {
+                    bench_tx_only_case(runtime, transports, &mut group, path, case);
+                }
+            }
+        }
+    }
+    group.finish();
+}
+
+fn bench_send_receive_case(
+    runtime: &Runtime,
+    transports: &BenchTransports,
+    group: &mut BenchmarkGroup<'_, criterion::measurement::WallTime>,
+    path: BenchPath,
+    case: BenchCase,
+    timeout: Duration,
+) {
+    let payload = PreparedPayload::for_path(path, case.payload_len);
+    group.bench_function(case.benchmark_id(path), |b| {
+        b.iter(|| {
+            runtime.block_on(async {
+                let id = next_uuid();
+                send_path(transports, path, &case, id.clone(), &payload, true).await;
+                let ack =
+                    receive_matching_ack(transports, path, &case, &id, true, &payload, timeout)
+                        .await;
+                black_box(ack.payload_len);
+                black_box(ack.checksum);
+                black_box(case.message_type.label());
+            });
+        });
+    });
+}
+
+fn bench_tx_only_case(
+    runtime: &Runtime,
+    transports: &BenchTransports,
+    group: &mut BenchmarkGroup<'_, criterion::measurement::WallTime>,
+    path: BenchPath,
+    case: BenchCase,
+) {
+    let payload = PreparedPayload::for_path(path, case.payload_len);
+    group.bench_function(case.benchmark_id(path), |b| {
+        b.iter_custom(|iterations| {
+            runtime.block_on(async {
+                let mut elapsed = Duration::ZERO;
+                for _ in 0..iterations {
+                    let id = next_uuid();
+                    let started = Instant::now();
+                    send_path(transports, path, &case, id.clone(), &payload, true).await;
+                    elapsed = elapsed.saturating_add(started.elapsed());
+                    let ack = receive_matching_ack(
+                        transports,
+                        path,
+                        &case,
+                        &id,
+                        true,
+                        &payload,
+                        BENCH_TIMEOUT,
+                    )
+                    .await;
+                    black_box(ack.checksum);
+                }
+                elapsed
+            })
+        });
+    });
+}
+
+fn bench_no_payload_smoke(
+    c: &mut Criterion,
+    runtime: &Runtime,
+    transports: &BenchTransports,
+    authority: &str,
+) {
+    let mut group = c.benchmark_group("transport_no_payload_smoke");
+    for path in [
+        BenchPath::Owned,
+        BenchPath::ZeroCopyLoanCopy,
+        BenchPath::ZeroCopyUninitDirect,
+    ] {
+        for message_type in [
+            BenchMessageType::Publish,
+            BenchMessageType::Notification,
+            BenchMessageType::Request,
+            BenchMessageType::Response,
+        ] {
+            let case = BenchCase::new(authority, message_type, "no_payload", 0);
+            let payload = PreparedPayload::no_payload_for(path);
+            group.bench_function(case.no_payload_benchmark_id(path), |b| {
+                b.iter(|| {
+                    runtime.block_on(async {
+                        let id = next_uuid();
+                        send_path(transports, path, &case, id.clone(), &payload, false).await;
+                        let ack = receive_matching_ack(
+                            transports,
+                            path,
+                            &case,
+                            &id,
+                            false,
+                            &payload,
+                            BENCH_TIMEOUT,
+                        )
+                        .await;
+                        black_box(ack.message_type);
+                    });
+                });
+            });
+        }
+    }
+    group.finish();
+}
+
+async fn send_path(
+    transports: &BenchTransports,
+    path: BenchPath,
+    case: &BenchCase,
+    id: UUID,
+    payload: &PreparedPayload,
+    payload_present: bool,
+) {
+    match path {
+        BenchPath::Owned => {
+            let frame = case.owned_frame(id, payload, payload_present);
+            transports
+                .owned
+                .send_owned(frame)
+                .await
+                .expect("LoLa benchmark owned send should succeed");
+        }
+        BenchPath::ZeroCopyLoanCopy => {
+            let metadata = case.metadata(id, payload_present);
+            let mut loan = transports
+                .zero_copy
+                .loan_tx(
+                    loan_spec(metadata, payload.len, payload_present).expect("valid loan spec"),
+                )
+                .await
+                .expect("LoLa zero-copy loan-copy loan should succeed");
+            if payload_present {
+                loan.payload_mut()
+                    .copy_from_slice(payload.bytes().expect("precomputed payload bytes"));
+            }
+            transports
+                .zero_copy
+                .send_zero_copy(loan)
+                .await
+                .expect("LoLa zero-copy loan-copy send should succeed");
+        }
+        BenchPath::ZeroCopyUninitDirect => {
+            let metadata = case.metadata(id, payload_present);
+            if payload_present {
+                transports
+                    .zero_copy
+                    .send_uninit_loaned_bytes_as::<RawBytes>(metadata, payload.len, 1, |writer| {
+                        write_pattern_to_uninit_writer(writer)
+                    })
+                    .await
+                    .expect("LoLa zero-copy uninit-direct send should succeed");
+            } else {
+                let loan = transports
+                    .zero_copy
+                    .loan_uninit_tx(
+                        UTxLoanSpec::no_payload(metadata).expect("valid no-payload spec"),
+                    )
+                    .await
+                    .expect("LoLa no-payload uninit loan should succeed");
+                // SAFETY: a no-payload loan has an empty visible payload range.
+                let loan = unsafe { loan.assume_payload_init() };
+                transports
+                    .zero_copy
+                    .send_zero_copy(loan)
+                    .await
+                    .expect("LoLa no-payload uninit send should succeed");
+            }
+        }
+    }
+}
+
+async fn receive_matching_ack(
+    transports: &BenchTransports,
+    path: BenchPath,
+    case: &BenchCase,
+    expected_id: &UUID,
+    payload_present: bool,
+    payload: &PreparedPayload,
+    timeout: Duration,
+) -> ReceivedAck {
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        assert!(
+            !remaining.is_zero(),
+            "timed out waiting for matching LoLa benchmark frame"
+        );
+        let result = match path {
+            BenchPath::Owned => tokio::time::timeout(
+                remaining,
+                transports
+                    .owned
+                    .receive_owned(&case.source, case.sink.as_ref()),
+            )
+            .await
+            .expect("timed out waiting for LoLa owned receive")
+            .map(owned_ack),
+            BenchPath::ZeroCopyLoanCopy | BenchPath::ZeroCopyUninitDirect => tokio::time::timeout(
+                remaining,
+                transports
+                    .zero_copy
+                    .receive_zero_copy(&case.source, case.sink.as_ref()),
+            )
+            .await
+            .expect("timed out waiting for LoLa zero-copy receive")
+            .map(|frame| lease_ack(&frame)),
+        };
+        match result {
+            Ok(ack) if &ack.id == expected_id => {
+                assert_eq!(ack.message_type, case.message_type.message_type());
+                assert_eq!(ack.has_payload, payload_present);
+                assert_eq!(
+                    ack.payload_len,
+                    if payload_present { payload.len } else { 0 }
+                );
+                assert_eq!(
+                    ack.checksum,
+                    if payload_present { payload.checksum } else { 0 }
+                );
+                return ack;
+            }
+            Ok(_) => continue,
+            Err(status) if status.get_code() == up_rust::UCode::NOT_FOUND => {
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+            Err(status) if status.get_code() == up_rust::UCode::INVALID_ARGUMENT => {
+                panic!("invalid LoLa benchmark sample before measurement: {status:?}");
+            }
+            Err(status) => panic!("unexpected LoLa receive error: {status:?}"),
+        }
+    }
+}
+
+fn owned_ack(frame: UOwnedFrame) -> ReceivedAck {
+    ReceivedAck {
+        id: frame.metadata().attributes().id().clone(),
+        message_type: frame.metadata().attributes().message_type(),
+        has_payload: frame.has_payload(),
+        payload_len: frame.payload_bytes().len(),
+        checksum: checksum_bytes(0, frame.payload_bytes()),
+    }
+}
+
+fn lease_ack(frame: &impl UFrameView) -> ReceivedAck {
+    ReceivedAck {
+        id: frame.metadata().attributes().id().clone(),
+        message_type: frame.metadata().attributes().message_type(),
+        has_payload: frame.has_payload(),
+        payload_len: frame.payload_len(),
+        checksum: frame.payload_slices().fold(0_u64, checksum_bytes),
+    }
+}
+
+fn loan_spec(
+    metadata: UFrameMetadata,
+    payload_len: usize,
+    payload_present: bool,
+) -> Result<UTxLoanSpec, UStatus> {
+    if !payload_present {
+        return UTxLoanSpec::no_payload(metadata);
+    }
+    if payload_len == 0 {
+        return UTxLoanSpec::present_empty_payload(metadata);
+    }
+    let layout = PayloadLayout::new(payload_len, 1).map_err(UStatus::from)?;
+    UTxLoanSpec::payload(metadata, layout)
+}
+
+fn write_pattern_to_uninit_writer<'a>(
+    mut writer: LoanedUninitByteWriter<'a>,
+) -> Result<LoanedUninitByteWriter<'a>, UWireError> {
+    let mut offset = 0;
+    let mut chunk = [0_u8; DIRECT_WRITE_CHUNK];
+    while offset < writer.len() {
+        let take = cmp::min(chunk.len(), writer.len() - offset);
+        fill_pattern(&mut chunk[..take], offset);
+        writer.write_all(&chunk[..take])?;
+        offset += take;
+    }
+    Ok(writer)
+}
+
+#[derive(Clone)]
+struct BenchConfig {
+    profile: BenchProfile,
+    transport: LolaTransportConfig,
+}
+
+impl BenchConfig {
+    fn for_profile(profile: BenchProfile) -> Self {
+        let lola_profile = match profile {
+            BenchProfile::Core | BenchProfile::All => "core",
+            BenchProfile::Camera => "camera",
+        };
+        let canonical = profile_defaults(lola_profile);
+        let config_path = std::env::var("LOLA_BENCH_MW_COM_CONFIG")
+            .unwrap_or_else(|_| canonical.config_path.to_string());
+        let transport = LolaTransportConfig {
+            local_authority: std::env::var("LOLA_BENCH_AUTHORITY")
+                .unwrap_or_else(|_| "vehicle".to_string()),
+            instance_specifier: std::env::var("LOLA_BENCH_INSTANCE_SPECIFIER")
+                .unwrap_or_else(|_| "uprotocol/transport/benchmark".to_string()),
+            service_type: std::env::var("LOLA_BENCH_SERVICE_TYPE")
+                .unwrap_or_else(|_| "/uprotocol/TransportBenchmark".to_string()),
+            event_name: std::env::var("LOLA_BENCH_EVENT_NAME")
+                .unwrap_or_else(|_| "benchmark_frame".to_string()),
+            sample_size: env_usize("LOLA_BENCH_SAMPLE_SIZE", canonical.sample_size),
+            sample_alignment: env_usize("LOLA_BENCH_SAMPLE_ALIGNMENT", 8),
+            max_samples: env_usize("LOLA_BENCH_MAX_SAMPLES", canonical.max_samples),
+            pull_mismatch_queue_capacity: LolaTransportConfig::DEFAULT_PULL_MISMATCH_QUEUE_CAPACITY,
+            pull_mismatch_queue_full_policy:
+                LolaTransportConfig::DEFAULT_PULL_MISMATCH_QUEUE_FULL_POLICY,
+            mw_com_config_path: Some(config_path),
+        };
+        Self { profile, transport }
+    }
+}
+
+#[allow(dead_code)]
+struct ProfileDefaults {
+    config_path: &'static str,
+    sample_size: usize,
+    max_samples: usize,
+    min_slots: usize,
+    min_queue: usize,
+    fit_payload_len: usize,
+}
+
+fn profile_defaults(profile: &str) -> ProfileDefaults {
+    match profile {
+        "camera" => ProfileDefaults {
+            config_path: concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/benches/fixtures/mw_com_config_benchmark_large.json"
+            ),
+            sample_size: 16_777_216,
+            max_samples: 16,
+            min_slots: 16,
+            min_queue: 16,
+            fit_payload_len: 12_441_600,
+        },
+        "core" => ProfileDefaults {
+            config_path: concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/benches/fixtures/mw_com_config_benchmark.json"
+            ),
+            sample_size: 131_072,
+            max_samples: 128,
+            min_slots: 128,
+            min_queue: 128,
+            fit_payload_len: 64 * 1_024,
+        },
+        other => panic!("unsupported LoLa benchmark profile {other}"),
+    }
+}
+
+fn env_usize(name: &str, default: usize) -> usize {
+    std::env::var(name)
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(default)
+}
+
+fn preflight(runtime: &Runtime, config: &BenchConfig) -> BenchTransports {
+    reject_ambiguous_lola_env();
+    #[cfg(feature = "lola-ffi")]
+    validate_native_fixture(config);
+    validate_rust_config(config);
+    let transports = BenchTransports::build(config.transport.clone());
+    runtime.block_on(async {
+        warm_round_trip(
+            &transports,
+            &config.transport.local_authority,
+            8,
+            BENCH_TIMEOUT,
+        )
+        .await;
+        let fit_timeout = if matches!(config.profile, BenchProfile::Camera) {
+            LARGE_SENSOR_BENCH_TIMEOUT
+        } else {
+            BENCH_TIMEOUT
+        };
+        let fit_len = if matches!(config.profile, BenchProfile::Camera) {
+            12_441_600
+        } else {
+            64 * 1_024
+        };
+        warm_round_trip(
+            &transports,
+            &config.transport.local_authority,
+            fit_len,
+            fit_timeout,
+        )
+        .await;
+    });
+    transports
+}
+
+fn reject_ambiguous_lola_env() {
+    for name in [
+        "LOLA_NATIVE_TEST_CONFIG",
+        "LOLA_NATIVE_TEST_AUTHORITY",
+        "LOLA_NATIVE_TEST_INSTANCE_SPECIFIER",
+        "LOLA_NATIVE_TEST_SERVICE_TYPE",
+        "LOLA_NATIVE_TEST_EVENT_NAME",
+        "LOLA_NATIVE_TEST_SAMPLE_SIZE",
+        "LOLA_NATIVE_TEST_SAMPLE_ALIGNMENT",
+        "LOLA_NATIVE_TEST_MAX_SAMPLES",
+    ] {
+        assert!(
+            std::env::var_os(name).is_none(),
+            "LoLa transport benchmarks use LOLA_BENCH_* only; unset {name}"
+        );
+    }
+}
+
+fn validate_rust_config(config: &BenchConfig) {
+    let defaults = if matches!(config.profile, BenchProfile::Camera) {
+        profile_defaults("camera")
+    } else {
+        profile_defaults("core")
+    };
+    assert!(config.transport.sample_size >= defaults.sample_size);
+    assert_eq!(config.transport.sample_alignment, 8);
+    if matches!(config.profile, BenchProfile::Camera) {
+        assert!(config.transport.max_samples >= defaults.max_samples);
+    } else {
+        assert_eq!(config.transport.max_samples, defaults.max_samples);
+    }
+}
+
+#[cfg(feature = "lola-ffi")]
+fn validate_native_fixture(config: &BenchConfig) {
+    let path = config
+        .transport
+        .mw_com_config_path
+        .as_ref()
+        .expect("LoLa benchmark fixture path should be configured");
+    assert!(
+        Path::new(path).exists(),
+        "LoLa benchmark fixture does not exist: {path}"
+    );
+    let fixture = std::fs::read_to_string(path).expect("LoLa benchmark fixture should be readable");
+    let json: Value =
+        serde_json::from_str(&fixture).expect("LoLa benchmark fixture should be JSON");
+    let defaults = if matches!(config.profile, BenchProfile::Camera) {
+        profile_defaults("camera")
+    } else {
+        profile_defaults("core")
+    };
+    assert_service_type(
+        &json,
+        &config.transport.service_type,
+        &config.transport.event_name,
+    );
+    assert_service_instance(
+        &json,
+        &config.transport.instance_specifier,
+        &config.transport.service_type,
+        &config.transport.event_name,
+        defaults.min_slots,
+    );
+    assert_queue_sizes(&json, defaults.min_queue);
+}
+
+#[cfg(feature = "lola-ffi")]
+fn assert_service_type(json: &Value, service_type: &str, event_name: &str) {
+    let ok = json["serviceTypes"].as_array().is_some_and(|types| {
+        types.iter().any(|entry| {
+            entry["serviceTypeName"] == service_type
+                && entry["bindings"].as_array().is_some_and(|bindings| {
+                    bindings.iter().any(|binding| {
+                        binding["binding"] == "SHM"
+                            && binding["serviceId"] == 6_241
+                            && binding["events"].as_array().is_some_and(|events| {
+                                events.iter().any(|event| {
+                                    event["eventName"] == event_name && event["eventId"] == 1
+                                })
+                            })
+                    })
+                })
+        })
+    });
+    assert!(
+        ok,
+        "LoLa benchmark fixture service type identity is invalid"
+    );
+}
+
+#[cfg(feature = "lola-ffi")]
+fn assert_service_instance(
+    json: &Value,
+    instance_specifier: &str,
+    service_type: &str,
+    event_name: &str,
+    min_slots: usize,
+) {
+    let ok = json["serviceInstances"]
+        .as_array()
+        .is_some_and(|instances| {
+            instances.iter().any(|entry| {
+                entry["instanceSpecifier"] == instance_specifier
+                    && entry["serviceTypeName"] == service_type
+                    && entry["instances"].as_array().is_some_and(|items| {
+                        items.iter().any(|item| {
+                            item["binding"] == "SHM"
+                                && item["asil-level"] == "QM"
+                                && item["events"].as_array().is_some_and(|events| {
+                                    events.iter().any(|event| {
+                                        event["eventName"] == event_name
+                                            && event["numberOfSampleSlots"].as_u64().unwrap_or(0)
+                                                >= min_slots as u64
+                                            && event["maxSubscribers"].as_u64().unwrap_or(0) >= 32
+                                            && event["numberOfIpcTracingSlots"]
+                                                .as_u64()
+                                                .unwrap_or(1)
+                                                == 0
+                                    })
+                                })
+                        })
+                    })
+            })
+        });
+    assert!(
+        ok,
+        "LoLa benchmark fixture service instance capacity is invalid"
+    );
+}
+
+#[cfg(feature = "lola-ffi")]
+fn assert_queue_sizes(json: &Value, min_queue: usize) {
+    let queue = &json["global"]["queue-size"];
+    assert_eq!(json["global"]["shm-size-calc-mode"], "SIMULATION");
+    assert!(queue["QM-receiver"].as_u64().unwrap_or(0) >= min_queue as u64);
+    assert!(queue["QM-sender"].as_u64().unwrap_or(0) >= min_queue as u64);
+}
+
+async fn warm_round_trip(
+    transports: &BenchTransports,
+    authority: &str,
+    payload_len: usize,
+    timeout: Duration,
+) {
+    let case = BenchCase::new(
+        authority,
+        BenchMessageType::Publish,
+        "preflight",
+        payload_len,
+    );
+    let payload = PreparedPayload::precomputed(payload_len);
+    let id = next_uuid();
+    send_path(
+        transports,
+        BenchPath::ZeroCopyLoanCopy,
+        &case,
+        id.clone(),
+        &payload,
+        true,
+    )
+    .await;
+    let ack = receive_matching_ack(
+        transports,
+        BenchPath::ZeroCopyLoanCopy,
+        &case,
+        &id,
+        true,
+        &payload,
+        timeout,
+    )
+    .await;
+    black_box(ack.checksum);
+}
+
+fn bench_transport(c: &mut Criterion) {
+    let profile = BenchProfile::from_lola_env();
+    let runtime = Builder::new_current_thread()
+        .enable_time()
+        .build()
+        .expect("tokio runtime");
+    if profile.includes_core() {
+        let config = BenchConfig::for_profile(BenchProfile::Core);
+        let transports = preflight(&runtime, &config);
+        bench_payload_matrix(
+            c,
+            &runtime,
+            &transports,
+            &config.transport.local_authority,
+            "transport_send_receive",
+            CORE_PAYLOAD_CASES,
+            BENCH_TIMEOUT,
+            true,
+        );
+        bench_payload_matrix(
+            c,
+            &runtime,
+            &transports,
+            &config.transport.local_authority,
+            "transport_tx_only",
+            CORE_PAYLOAD_CASES,
+            BENCH_TIMEOUT,
+            false,
+        );
+        bench_no_payload_smoke(c, &runtime, &transports, &config.transport.local_authority);
+    }
+    if profile.includes_camera() {
+        let config = BenchConfig::for_profile(BenchProfile::Camera);
+        let transports = preflight(&runtime, &config);
+        bench_payload_matrix(
+            c,
+            &runtime,
+            &transports,
+            &config.transport.local_authority,
+            "transport_large_sensor_send_receive",
+            LARGE_SENSOR_PAYLOAD_CASES,
+            LARGE_SENSOR_BENCH_TIMEOUT,
+            true,
+        );
+        bench_payload_matrix(
+            c,
+            &runtime,
+            &transports,
+            &config.transport.local_authority,
+            "transport_large_sensor_tx_only",
+            LARGE_SENSOR_PAYLOAD_CASES,
+            LARGE_SENSOR_BENCH_TIMEOUT,
+            false,
+        );
+    }
+}
+
+fn fill_pattern(dst: &mut [u8], start: usize) {
+    for (offset, byte) in dst.iter_mut().enumerate() {
+        *byte = u8::try_from((start + offset) % 251).expect("pattern byte fits");
+    }
+}
+
+fn checksum_for_len(len: usize) -> u64 {
+    let mut checksum = 0_u64;
+    let mut offset = 0;
+    let mut chunk = [0_u8; DIRECT_WRITE_CHUNK];
+    while offset < len {
+        let take = cmp::min(chunk.len(), len - offset);
+        fill_pattern(&mut chunk[..take], offset);
+        checksum = checksum_bytes(checksum, &chunk[..take]);
+        offset += take;
+    }
+    checksum
+}
+
+fn checksum_bytes(checksum: u64, bytes: &[u8]) -> u64 {
+    bytes.iter().fold(checksum, |checksum, byte| {
+        checksum.wrapping_mul(16_777_619) ^ u64::from(*byte)
+    })
+}
+
+fn next_sequence() -> u64 {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static SEQUENCE: AtomicU64 = AtomicU64::new(1);
+    SEQUENCE.fetch_add(1, Ordering::Relaxed)
+}
+
+fn next_uuid() -> UUID {
+    uuid_for(next_sequence())
+}
+
+fn uuid_for(sequence: u64) -> UUID {
+    let timestamp_millis = u64::try_from(
+        SystemTime::UNIX_EPOCH
+            .elapsed()
+            .expect("system time should be after UNIX epoch")
+            .as_millis(),
+    )
+    .expect("timestamp millis should fit in u64");
+    let msb = (timestamp_millis << 16) | 0x7000 | (sequence & 0x0fff);
+    let lsb = UUID_LSB_BASE | (sequence & 0x3fff_ffff_ffff_ffff);
+    UUID::from_u64_pair(msb, lsb).expect("benchmark UUID should be valid UUIDv7")
+}
+
+fn resource_id(base: u16, sequence: u64) -> u16 {
+    let offset = u16::try_from(sequence % 0x0fff).expect("resource offset fits in u16");
+    base.checked_add(offset)
+        .expect("benchmark resource id fits")
+}
+
+fn uri(authority: &str, entity_type: u32, resource: u16) -> UUri {
+    UUri::try_from_parts(authority, entity_type, 1, resource).expect("valid benchmark URI")
+}
+
+criterion_group!(transport_criterion, bench_transport);
+criterion_main!(transport_criterion);

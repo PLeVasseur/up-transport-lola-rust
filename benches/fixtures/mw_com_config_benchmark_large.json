@@ -1,0 +1,56 @@
+{
+  "serviceTypes": [
+    {
+      "serviceTypeName": "/uprotocol/TransportBenchmark",
+      "version": {
+        "major": 1,
+        "minor": 0
+      },
+      "bindings": [
+        {
+          "binding": "SHM",
+          "serviceId": 6241,
+          "events": [
+            {
+              "eventName": "benchmark_frame",
+              "eventId": 1
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "serviceInstances": [
+    {
+      "instanceSpecifier": "uprotocol/transport/benchmark",
+      "serviceTypeName": "/uprotocol/TransportBenchmark",
+      "version": {
+        "major": 1,
+        "minor": 0
+      },
+      "instances": [
+        {
+          "instanceId": 1,
+          "asil-level": "QM",
+          "binding": "SHM",
+          "events": [
+            {
+              "eventName": "benchmark_frame",
+              "numberOfSampleSlots": 16,
+              "maxSubscribers": 32,
+              "numberOfIpcTracingSlots": 0
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "global": {
+    "asil-level": "QM",
+    "queue-size": {
+      "QM-receiver": 16,
+      "QM-sender": 16
+    },
+    "shm-size-calc-mode": "SIMULATION"
+  }
+}
