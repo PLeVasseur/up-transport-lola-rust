@@ -26,7 +26,7 @@ mod frame;
 mod owned_benchmark;
 mod transport;
 
-#[cfg(feature = "native")]
+#[cfg(feature = "lola-ffi")]
 mod sys;
 
 pub use config::{LolaPullMismatchQueueFullPolicy, LolaTransportConfig};

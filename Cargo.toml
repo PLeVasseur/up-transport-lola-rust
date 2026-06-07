@@ -11,8 +11,10 @@ repository = "https://github.com/eclipse-uprotocol/up-transport-lola-rust"
 build = "build.rs"
 
 [features]
-default = ["native"]
-native = []
+default = ["bundled"]
+bundled = ["lola-build-from-source"]
+lola-build-from-source = ["lola-ffi"]
+lola-ffi = []
 zero-copy = []
 benchmark-owned = ["up-rust/owned-frame-transport"]
 payload-contract-benchmarks = ["up-rust/payload-contract-fixtures"]
@@ -21,7 +23,6 @@ payload-contract-large-benchmarks = [
     "up-rust/payload-contract-large-fixtures",
 ]
 test-stub = []
-lola-build-from-source = ["native"]
 
 [[bench]]
 name = "transport_criterion"

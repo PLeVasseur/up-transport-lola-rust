@@ -43,17 +43,17 @@ run_stub() {
 
 run_check() {
     ensure_bazelisk
-    cargo check --all-targets --no-default-features --features native "$@"
+    cargo check --all-targets "$@"
 }
 
 run_native() {
     ensure_bazelisk
-    cargo test --all-targets --no-default-features --features native -- --ignored native "$@"
+    cargo test --all-targets -- --ignored native "$@"
 }
 
 run_docs() {
     ensure_bazelisk
-    RUSTDOCFLAGS=-Dwarnings cargo doc --no-deps --no-default-features --features native "$@"
+    RUSTDOCFLAGS=-Dwarnings cargo doc --no-deps "$@"
 }
 
 case "${mode}" in

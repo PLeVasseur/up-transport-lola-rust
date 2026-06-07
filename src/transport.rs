@@ -6,20 +6,20 @@
 
 use std::sync::Mutex;
 use std::{collections::VecDeque, sync::Arc};
-#[cfg(feature = "native")]
+#[cfg(feature = "lola-ffi")]
 use std::{sync::Weak, time::Duration};
 
 use async_trait::async_trait;
-#[cfg(feature = "native")]
+#[cfg(feature = "lola-ffi")]
 use tokio::task::JoinHandle;
 use up_rust::{
     UCode, UFrameView, UStatus, UUri, UZeroCopyListener, UZeroCopyTransportImpl,
     UZeroCopyUninitTransportImpl, ValidatedTxLoanSpec,
 };
 
-#[cfg(any(feature = "test-stub", feature = "native"))]
+#[cfg(any(feature = "test-stub", feature = "lola-ffi"))]
 use crate::config::LolaPullMismatchQueueFullPolicy;
-#[cfg(feature = "native")]
+#[cfg(feature = "lola-ffi")]
 use crate::sys::{NativeSubscriber, NativeTransport};
 use crate::{
     config::LolaTransportConfig,
@@ -33,17 +33,17 @@ use crate::{
 /// leases keep the sample alive until callers drop the lease.
 pub struct UTransportLola {
     config: LolaTransportConfig,
-    #[cfg(feature = "native")]
+    #[cfg(feature = "lola-ffi")]
     self_ref: Weak<UTransportLola>,
     #[cfg(feature = "test-stub")]
     pending_samples: Mutex<VecDeque<Vec<u8>>>,
     listeners: Mutex<Vec<ListenerRegistration>>,
     pull_mismatch_queue: Mutex<PullMismatchQueueState>,
-    #[cfg(feature = "native")]
+    #[cfg(feature = "lola-ffi")]
     listener_task: Mutex<Option<JoinHandle<()>>>,
-    #[cfg(feature = "native")]
+    #[cfg(feature = "lola-ffi")]
     native: NativeTransport,
-    #[cfg(feature = "native")]
+    #[cfg(feature = "lola-ffi")]
     subscriber: Mutex<Option<NativeSubscriber>>,
 }
 
@@ -53,24 +53,24 @@ impl UTransportLola {
     /// # Errors
     ///
     /// Returns validation errors from [`LolaTransportConfig::validate`] or native
-    /// bridge initialization errors when the `native` feature is active.
+    /// bridge initialization errors when the `lola-ffi` feature is active.
     pub fn build(config: LolaTransportConfig) -> Result<Arc<Self>, UStatus> {
         config.validate()?;
-        #[cfg(feature = "native")]
+        #[cfg(feature = "lola-ffi")]
         let native = NativeTransport::new(&config)?;
         Ok(Arc::new_cyclic(|_self_ref| Self {
             config,
-            #[cfg(feature = "native")]
+            #[cfg(feature = "lola-ffi")]
             self_ref: _self_ref.clone(),
             #[cfg(feature = "test-stub")]
             pending_samples: Mutex::new(VecDeque::new()),
             listeners: Mutex::new(Vec::new()),
             pull_mismatch_queue: Mutex::new(PullMismatchQueueState::default()),
-            #[cfg(feature = "native")]
+            #[cfg(feature = "lola-ffi")]
             listener_task: Mutex::new(None),
-            #[cfg(feature = "native")]
+            #[cfg(feature = "lola-ffi")]
             native,
-            #[cfg(feature = "native")]
+            #[cfg(feature = "lola-ffi")]
             subscriber: Mutex::new(None),
         }))
     }
@@ -89,7 +89,7 @@ impl UTransportLola {
             .diagnostics()
     }
 
-    #[cfg(feature = "native")]
+    #[cfg(feature = "lola-ffi")]
     fn receive_next_zero_copy(&self) -> Result<LolaRxLease, UStatus> {
         let mut subscriber = self
             .subscriber
@@ -105,7 +105,7 @@ impl UTransportLola {
         LolaRxLease::from_native(sample)
     }
 
-    #[cfg(feature = "native")]
+    #[cfg(feature = "lola-ffi")]
     fn ensure_listener_task(&self) -> Result<(), UStatus> {
         let mut task = self
             .listener_task
@@ -126,7 +126,7 @@ impl UTransportLola {
         Ok(())
     }
 
-    #[cfg(feature = "native")]
+    #[cfg(feature = "lola-ffi")]
     async fn listener_loop(self_ref: Weak<Self>) {
         loop {
             let Some(transport) = self_ref.upgrade() else {
@@ -164,7 +164,7 @@ impl UTransportLola {
         }
     }
 
-    #[cfg(feature = "native")]
+    #[cfg(feature = "lola-ffi")]
     fn poll_native_listener_frames(
         &self,
     ) -> Result<Vec<(Arc<dyn UZeroCopyListener<LolaRxLease>>, LolaRxLease)>, UStatus> {
@@ -204,7 +204,7 @@ impl UTransportLola {
         state.queue.remove(index)
     }
 
-    #[cfg(any(feature = "test-stub", feature = "native"))]
+    #[cfg(any(feature = "test-stub", feature = "lola-ffi"))]
     fn queue_pull_sample(&self, frame: LolaRxLease) -> Result<(), UStatus> {
         let capacity = self.config.pull_mismatch_queue_capacity;
         let mut state = self
@@ -333,7 +333,7 @@ struct ListenerRegistration {
     source_filter: UUri,
     sink_filter: Option<UUri>,
     listener: Arc<dyn UZeroCopyListener<LolaRxLease>>,
-    #[cfg(feature = "native")]
+    #[cfg(feature = "lola-ffi")]
     subscriber: NativeSubscriber,
 }
 
@@ -344,18 +344,18 @@ impl ListenerRegistration {
         listener: Arc<dyn UZeroCopyListener<LolaRxLease>>,
         _config: &LolaTransportConfig,
     ) -> Result<Self, UStatus> {
-        #[cfg(feature = "native")]
+        #[cfg(feature = "lola-ffi")]
         let subscriber = NativeSubscriber::new(_config)?;
         Ok(Self {
             source_filter: source_filter.to_owned(),
             sink_filter: sink_filter.map(ToOwned::to_owned),
             listener,
-            #[cfg(feature = "native")]
+            #[cfg(feature = "lola-ffi")]
             subscriber,
         })
     }
 
-    #[cfg(any(feature = "test-stub", feature = "native"))]
+    #[cfg(any(feature = "test-stub", feature = "lola-ffi"))]
     fn matches_frame(&self, frame: &LolaRxLease) -> bool {
         frame_matches(frame, &self.source_filter, self.sink_filter.as_ref())
     }
@@ -394,18 +394,18 @@ impl UZeroCopyTransportImpl for UTransportLola {
         let alignment = spec.payload_alignment();
         self.validate_payload_alignment(alignment)?;
 
-        #[cfg(feature = "native")]
+        #[cfg(feature = "lola-ffi")]
         {
             let sample = self.native.loan_sample()?;
             return LolaTxLoan::new_native(metadata, sample, payload_len, alignment);
         }
 
-        #[cfg(all(feature = "test-stub", not(feature = "native")))]
+        #[cfg(all(feature = "test-stub", not(feature = "lola-ffi")))]
         {
             return LolaTxLoan::new_vec(metadata, self.config.sample_size, payload_len, alignment);
         }
 
-        #[cfg(not(any(feature = "test-stub", feature = "native")))]
+        #[cfg(not(any(feature = "test-stub", feature = "lola-ffi")))]
         {
             let _ = (metadata, payload_len);
             Err(backend_unavailable())
@@ -413,13 +413,13 @@ impl UZeroCopyTransportImpl for UTransportLola {
     }
 
     async fn send_validated_zero_copy(&self, buffer: Self::Tx) -> Result<(), UStatus> {
-        #[cfg(feature = "native")]
+        #[cfg(feature = "lola-ffi")]
         {
             let loan = buffer.into_native()?;
             return self.native.send(loan);
         }
 
-        #[cfg(all(feature = "test-stub", not(feature = "native")))]
+        #[cfg(all(feature = "test-stub", not(feature = "lola-ffi")))]
         {
             let sample = buffer.into_vec();
             self.deliver_test_stub_sample(&sample).await?;
@@ -430,7 +430,7 @@ impl UZeroCopyTransportImpl for UTransportLola {
             return Ok(());
         }
 
-        #[cfg(not(any(feature = "test-stub", feature = "native")))]
+        #[cfg(not(any(feature = "test-stub", feature = "lola-ffi")))]
         {
             let _ = buffer;
             Err(backend_unavailable())
@@ -446,7 +446,7 @@ impl UZeroCopyTransportImpl for UTransportLola {
             return Ok(frame);
         }
 
-        #[cfg(feature = "native")]
+        #[cfg(feature = "lola-ffi")]
         {
             loop {
                 let frame = self.receive_next_zero_copy()?;
@@ -457,7 +457,7 @@ impl UZeroCopyTransportImpl for UTransportLola {
             }
         }
 
-        #[cfg(all(feature = "test-stub", not(feature = "native")))]
+        #[cfg(all(feature = "test-stub", not(feature = "lola-ffi")))]
         {
             loop {
                 let sample = self
@@ -479,7 +479,7 @@ impl UZeroCopyTransportImpl for UTransportLola {
             }
         }
 
-        #[cfg(not(any(feature = "test-stub", feature = "native")))]
+        #[cfg(not(any(feature = "test-stub", feature = "lola-ffi")))]
         {
             Err(backend_unavailable())
         }
@@ -508,7 +508,7 @@ impl UZeroCopyTransportImpl for UTransportLola {
         listeners.push(registration);
         drop(listeners);
 
-        #[cfg(feature = "native")]
+        #[cfg(feature = "lola-ffi")]
         self.ensure_listener_task()?;
 
         Ok(())
@@ -537,7 +537,7 @@ impl UZeroCopyTransportImpl for UTransportLola {
             listeners.is_empty()
         };
 
-        #[cfg(feature = "native")]
+        #[cfg(feature = "lola-ffi")]
         if should_stop {
             if let Some(task) = self
                 .listener_task
@@ -549,7 +549,7 @@ impl UZeroCopyTransportImpl for UTransportLola {
             }
         }
 
-        #[cfg(not(feature = "native"))]
+        #[cfg(not(feature = "lola-ffi"))]
         let _ = should_stop;
 
         Ok(())
@@ -569,13 +569,13 @@ impl UZeroCopyUninitTransportImpl for UTransportLola {
         let alignment = spec.payload_alignment();
         self.validate_payload_alignment(alignment)?;
 
-        #[cfg(feature = "native")]
+        #[cfg(feature = "lola-ffi")]
         {
             let sample = self.native.loan_sample()?;
             return LolaUninitTxLoan::new_native(metadata, sample, payload_len, alignment);
         }
 
-        #[cfg(all(feature = "test-stub", not(feature = "native")))]
+        #[cfg(all(feature = "test-stub", not(feature = "lola-ffi")))]
         {
             return LolaUninitTxLoan::new_vec(
                 metadata,
@@ -585,7 +585,7 @@ impl UZeroCopyUninitTransportImpl for UTransportLola {
             );
         }
 
-        #[cfg(not(any(feature = "test-stub", feature = "native")))]
+        #[cfg(not(any(feature = "test-stub", feature = "lola-ffi")))]
         {
             let _ = (metadata, payload_len);
             Err(backend_unavailable())
@@ -593,7 +593,7 @@ impl UZeroCopyUninitTransportImpl for UTransportLola {
     }
 }
 
-#[cfg(not(any(feature = "test-stub", feature = "native")))]
+#[cfg(not(any(feature = "test-stub", feature = "lola-ffi")))]
 fn backend_unavailable() -> UStatus {
     UStatus::fail_with_code(
         UCode::FailedPrecondition,
@@ -604,8 +604,8 @@ fn backend_unavailable() -> UStatus {
 #[cfg(all(
     test,
     any(
-        all(feature = "test-stub", not(feature = "native")),
-        not(any(feature = "test-stub", feature = "native"))
+        all(feature = "test-stub", not(feature = "lola-ffi")),
+        not(any(feature = "test-stub", feature = "lola-ffi"))
     )
 ))]
 mod tests {
@@ -847,7 +847,7 @@ mod tests {
         assert_eq!(error.get_code(), UCode::InvalidArgument);
     }
 
-    #[cfg(not(any(feature = "test-stub", feature = "native")))]
+    #[cfg(not(any(feature = "test-stub", feature = "lola-ffi")))]
     #[test]
     fn tx_loan_requires_backend_feature() {
         let transport = UTransportLola::build(test_config()).unwrap();

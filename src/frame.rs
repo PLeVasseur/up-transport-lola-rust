@@ -17,7 +17,7 @@ use up_rust::{
     UTxBuffer, UUninitTxBuffer, UWireError, UZeroCopyRxLease,
 };
 
-#[cfg(feature = "native")]
+#[cfg(feature = "lola-ffi")]
 use crate::sys::{NativeRxSample, NativeTxLoan};
 
 const LOLA_FRAME_MAGIC: &[u8; 4] = b"ULOL";
@@ -46,18 +46,18 @@ pub struct LolaUninitTxLoan {
 enum LolaTxStorage {
     #[cfg(feature = "test-stub")]
     Vec(Vec<u8>),
-    #[cfg(feature = "native")]
+    #[cfg(feature = "lola-ffi")]
     Native(NativeTxLoan),
-    #[cfg(not(any(feature = "test-stub", feature = "native")))]
+    #[cfg(not(any(feature = "test-stub", feature = "lola-ffi")))]
     Unavailable,
 }
 
 enum LolaUninitTxStorage {
     #[cfg(feature = "test-stub")]
     Vec(Vec<MaybeUninit<u8>>),
-    #[cfg(feature = "native")]
+    #[cfg(feature = "lola-ffi")]
     Native(NativeTxLoan),
-    #[cfg(not(any(feature = "test-stub", feature = "native")))]
+    #[cfg(not(any(feature = "test-stub", feature = "lola-ffi")))]
     Unavailable,
 }
 
@@ -66,9 +66,9 @@ impl LolaTxStorage {
         match self {
             #[cfg(feature = "test-stub")]
             Self::Vec(sample) => sample.as_slice(),
-            #[cfg(feature = "native")]
+            #[cfg(feature = "lola-ffi")]
             Self::Native(sample) => sample.as_slice(),
-            #[cfg(not(any(feature = "test-stub", feature = "native")))]
+            #[cfg(not(any(feature = "test-stub", feature = "lola-ffi")))]
             Self::Unavailable => {
                 unreachable!("LoLa storage is unavailable without a backend feature")
             }
@@ -79,9 +79,9 @@ impl LolaTxStorage {
         match self {
             #[cfg(feature = "test-stub")]
             Self::Vec(sample) => sample.as_mut_slice(),
-            #[cfg(feature = "native")]
+            #[cfg(feature = "lola-ffi")]
             Self::Native(sample) => sample.as_mut_slice(),
-            #[cfg(not(any(feature = "test-stub", feature = "native")))]
+            #[cfg(not(any(feature = "test-stub", feature = "lola-ffi")))]
             Self::Unavailable => {
                 unreachable!("LoLa storage is unavailable without a backend feature")
             }
@@ -94,9 +94,9 @@ impl LolaUninitTxStorage {
         match self {
             #[cfg(feature = "test-stub")]
             Self::Vec(sample) => sample.as_mut_slice(),
-            #[cfg(feature = "native")]
+            #[cfg(feature = "lola-ffi")]
             Self::Native(sample) => sample.as_uninit_slice(),
-            #[cfg(not(any(feature = "test-stub", feature = "native")))]
+            #[cfg(not(any(feature = "test-stub", feature = "lola-ffi")))]
             Self::Unavailable => {
                 unreachable!("LoLa storage is unavailable without a backend feature")
             }
@@ -123,7 +123,7 @@ impl LolaTxLoan {
         })
     }
 
-    #[cfg(feature = "native")]
+    #[cfg(feature = "lola-ffi")]
     pub(crate) fn new_native(
         metadata: UFrameMetadata,
         mut sample: NativeTxLoan,
@@ -153,7 +153,7 @@ impl LolaTxLoan {
         }
     }
 
-    #[cfg(feature = "native")]
+    #[cfg(feature = "lola-ffi")]
     pub(crate) fn into_native(self) -> Result<NativeTxLoan, UStatus> {
         if self.sample.as_slice().get(..4) != Some(LOLA_FRAME_MAGIC.as_slice()) {
             return Err(UStatus::fail_with_code(
@@ -186,7 +186,7 @@ impl LolaUninitTxLoan {
         })
     }
 
-    #[cfg(feature = "native")]
+    #[cfg(feature = "lola-ffi")]
     pub(crate) fn new_native(
         metadata: UFrameMetadata,
         mut sample: NativeTxLoan,
@@ -271,9 +271,9 @@ impl UUninitTxBuffer for LolaUninitTxLoan {
                 // and the caller guarantees the visible payload bytes are initialized.
                 LolaTxStorage::Vec(unsafe { Vec::from_raw_parts(ptr, len, capacity) })
             }
-            #[cfg(feature = "native")]
+            #[cfg(feature = "lola-ffi")]
             LolaUninitTxStorage::Native(sample) => LolaTxStorage::Native(sample),
-            #[cfg(not(any(feature = "test-stub", feature = "native")))]
+            #[cfg(not(any(feature = "test-stub", feature = "lola-ffi")))]
             LolaUninitTxStorage::Unavailable => LolaTxStorage::Unavailable,
         };
         LolaTxLoan {
@@ -299,9 +299,9 @@ pub struct LolaRxLease {
 enum LolaRxStorage {
     #[cfg(feature = "test-stub")]
     Vec(Vec<u8>),
-    #[cfg(feature = "native")]
+    #[cfg(feature = "lola-ffi")]
     Native(NativeRxSample),
-    #[cfg(not(any(feature = "test-stub", feature = "native")))]
+    #[cfg(not(any(feature = "test-stub", feature = "lola-ffi")))]
     Unavailable,
 }
 
@@ -310,9 +310,9 @@ impl LolaRxStorage {
         match self {
             #[cfg(feature = "test-stub")]
             Self::Vec(sample) => sample.as_slice(),
-            #[cfg(feature = "native")]
+            #[cfg(feature = "lola-ffi")]
             Self::Native(sample) => sample.as_slice(),
-            #[cfg(not(any(feature = "test-stub", feature = "native")))]
+            #[cfg(not(any(feature = "test-stub", feature = "lola-ffi")))]
             Self::Unavailable => {
                 unreachable!("LoLa storage is unavailable without a backend feature")
             }
@@ -334,7 +334,7 @@ impl LolaRxLease {
         Ok(lease)
     }
 
-    #[cfg(feature = "native")]
+    #[cfg(feature = "lola-ffi")]
     pub(crate) fn from_native(sample: NativeRxSample) -> Result<Self, UStatus> {
         let (metadata, payload_offset, payload_len) = read_frame_header(sample.as_slice())?;
         let lease = Self {
