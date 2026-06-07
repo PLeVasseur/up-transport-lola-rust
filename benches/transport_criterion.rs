@@ -4,7 +4,13 @@
  * SPDX-License-Identifier: Apache-2.0
  ********************************************************************************/
 
-#![allow(missing_docs, clippy::missing_panics_doc, clippy::too_many_lines)]
+#![allow(
+    dead_code,
+    missing_docs,
+    unused_imports,
+    clippy::missing_panics_doc,
+    clippy::too_many_lines
+)]
 
 use std::{sync::Arc, time::Duration};
 
@@ -32,6 +38,7 @@ const PAYLOAD_CONTRACT_SEQUENCE: u32 = 1;
 
 #[derive(Clone, Copy)]
 enum BenchSuite {
+    Raw,
     PayloadContract,
     All,
 }
@@ -39,12 +46,17 @@ enum BenchSuite {
 impl BenchSuite {
     fn from_env() -> Self {
         match std::env::var("TRANSPORT_BENCH_SUITE")
-            .unwrap_or_else(|_| "payload-contract".to_string())
+            .unwrap_or_else(|_| "raw".to_string())
             .as_str()
         {
+            "raw" => Self::Raw,
             "payload-contract" => Self::PayloadContract,
             "all" => Self::All,
-            other => panic!("TRANSPORT_BENCH_SUITE must be payload-contract or all; got {other}"),
+            other => {
+                panic!(
+                    "TRANSPORT_BENCH_SUITE must be one of raw, payload-contract, all; got {other}"
+                )
+            }
         }
     }
 
