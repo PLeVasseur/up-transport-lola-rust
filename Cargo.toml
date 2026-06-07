@@ -17,6 +17,7 @@ test-stub = []
 lola-build-from-source = ["native"]
 
 [dependencies]
+async-trait = "0.1"
 protobuf = { version = "3.7.2", features = ["with-bytes"] }
 up-rust = { git = "https://github.com/PLeVasseur/up-rust.git", rev = "3467db44c427b0a7bd793ce65eeadaef205ca88d" }
 
