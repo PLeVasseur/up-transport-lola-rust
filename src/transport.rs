@@ -22,10 +22,10 @@ use crate::{
 
 /// Zero-copy uProtocol transport backed by a LoLa generic event.
 ///
-/// This phase implements the transmit side only: initialized TX loans,
+/// This implementation provides the transmit side only: initialized TX loans,
 /// uninitialized TX loans, and committing a TX loan. Pull receive and listener
 /// behavior intentionally use the default `UCode::Unimplemented` zero-copy trait
-/// methods until the RX phase adds that behavior.
+/// methods until receive support is added.
 pub struct UTransportLola {
     config: LolaTransportConfig,
     #[cfg(feature = "test-stub")]
