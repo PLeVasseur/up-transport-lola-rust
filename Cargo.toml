@@ -11,16 +11,30 @@ repository = "https://github.com/eclipse-uprotocol/up-transport-lola-rust"
 build = "build.rs"
 
 [features]
-default = []
+default = ["native"]
 native = []
+zero-copy = []
+benchmark-owned = ["up-rust/owned-frame-transport"]
+payload-contract-benchmarks = ["up-rust/payload-contract-fixtures"]
+payload-contract-large-benchmarks = [
+    "payload-contract-benchmarks",
+    "up-rust/payload-contract-large-fixtures",
+]
 test-stub = []
 lola-build-from-source = ["native"]
+
+[[bench]]
+name = "transport_criterion"
+harness = false
 
 [dependencies]
 async-trait = "0.1"
 protobuf = { version = "3.7.2", features = ["with-bytes"] }
-tokio = { version = "1.45.1", default-features = false, features = ["rt", "time"] }
+tokio = { version = "1.45.1", default-features = false, features = ["rt", "sync", "time"] }
 up-rust = { git = "https://github.com/PLeVasseur/up-rust.git", rev = "3467db44c427b0a7bd793ce65eeadaef205ca88d" }
+
+[dev-dependencies]
+criterion = { version = "0.5.1", features = ["csv_output"] }
 
 [package.metadata.docs.rs]
 no-default-features = true

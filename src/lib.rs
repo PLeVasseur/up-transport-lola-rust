@@ -15,13 +15,15 @@
 //!
 //! This crate currently contains the native LoLa frame layout and FFI wrapper
 //! primitives plus zero-copy TX loans, RX leases, and listener support.
-//! Benchmark support is layered in later branches.
+//! Benchmark-owned support is available only behind the `benchmark-owned` feature.
 
 #![warn(rustdoc::bare_urls, rustdoc::broken_intra_doc_links)]
 #![cfg_attr(docsrs, feature(doc_cfg))]
 
 mod config;
 mod frame;
+#[cfg(feature = "benchmark-owned")]
+mod owned_benchmark;
 mod transport;
 
 #[cfg(feature = "native")]
@@ -29,6 +31,8 @@ mod sys;
 
 pub use config::{LolaPullMismatchQueueFullPolicy, LolaTransportConfig};
 pub use frame::{LolaRxLease, LolaTxLoan, LolaUninitTxLoan};
+#[cfg(feature = "benchmark-owned")]
+pub use owned_benchmark::BenchmarkOwnedLolaTransport;
 pub use transport::{LolaPullMismatchQueueDiagnostics, UTransportLola};
 
 #[cfg(test)]
