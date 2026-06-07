@@ -13,12 +13,21 @@
 
 //! Rust crate shell for the Eclipse S-CORE LoLa uProtocol transport.
 //!
-//! This crate currently exposes no transport implementation. Native LoLa
-//! integration, fixed-sample frame layout, zero-copy TX/RX, and benchmark support
-//! are not implemented in this crate shell.
+//! This crate currently contains the native LoLa frame layout and FFI wrapper
+//! primitives. The full transport TX/RX implementation and benchmark support are
+//! layered in later branches.
 
 #![warn(rustdoc::bare_urls, rustdoc::broken_intra_doc_links)]
 #![cfg_attr(docsrs, feature(doc_cfg))]
+
+mod config;
+mod frame;
+
+#[cfg(feature = "native")]
+mod sys;
+
+pub use config::{LolaPullMismatchQueueFullPolicy, LolaTransportConfig};
+pub use frame::{LolaRxLease, LolaTxLoan, LolaUninitTxLoan};
 
 #[cfg(test)]
 mod tests {
