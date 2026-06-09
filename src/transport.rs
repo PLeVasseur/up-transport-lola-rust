@@ -45,6 +45,8 @@ pub struct UTransportLola {
     native: NativeTransport,
     #[cfg(feature = "lola-ffi")]
     subscriber: Mutex<Option<NativeSubscriber>>,
+    #[cfg(feature = "lola-ffi")]
+    listener_subscriber: Mutex<Option<NativeSubscriber>>,
 }
 
 impl UTransportLola {
@@ -72,6 +74,8 @@ impl UTransportLola {
             native,
             #[cfg(feature = "lola-ffi")]
             subscriber: Mutex::new(None),
+            #[cfg(feature = "lola-ffi")]
+            listener_subscriber: Mutex::new(None),
         }))
     }
 
@@ -103,6 +107,30 @@ impl UTransportLola {
             .expect("LoLa subscriber should be initialized")
             .receive()?;
         LolaRxLease::from_native(sample)
+    }
+
+    #[cfg(feature = "lola-ffi")]
+    fn receive_next_listener_frame(&self) -> Result<LolaRxLease, UStatus> {
+        let mut subscriber = self
+            .listener_subscriber
+            .lock()
+            .expect("LoLa native listener subscriber lock poisoned");
+        if subscriber.is_none() {
+            *subscriber = Some(NativeSubscriber::new(&self.config)?);
+        }
+        let sample = subscriber
+            .as_ref()
+            .expect("LoLa listener subscriber should be initialized")
+            .receive()?;
+        LolaRxLease::from_native(sample)
+    }
+
+    #[cfg(feature = "lola-ffi")]
+    fn drop_listener_subscriber(&self) {
+        self.listener_subscriber
+            .lock()
+            .expect("LoLa native listener subscriber lock poisoned")
+            .take();
     }
 
     #[cfg(feature = "lola-ffi")]
@@ -139,6 +167,7 @@ impl UTransportLola {
                 .expect("LoLa listener registry lock poisoned")
                 .is_empty()
             {
+                transport.drop_listener_subscriber();
                 break;
             }
 
@@ -168,24 +197,20 @@ impl UTransportLola {
     fn poll_native_listener_frames(
         &self,
     ) -> Result<Vec<(Arc<dyn UZeroCopyListener<LolaRxLease>>, LolaRxLease)>, UStatus> {
+        let frame = match self.receive_next_listener_frame() {
+            Ok(frame) => frame,
+            Err(status) if status.get_code() == UCode::NotFound => return Ok(Vec::new()),
+            Err(status) => return Err(status),
+        };
         let listeners = self
             .listeners
             .lock()
             .expect("LoLa listener registry lock poisoned");
-        let mut deliveries = Vec::new();
-        for registration in listeners.iter() {
-            match registration.subscriber.receive() {
-                Ok(sample) => {
-                    let frame = LolaRxLease::from_native(sample)?;
-                    if registration.matches_frame(&frame) {
-                        deliveries.push((Arc::clone(&registration.listener), frame));
-                    }
-                }
-                Err(status) if status.get_code() == UCode::NotFound => {}
-                Err(status) => return Err(status),
-            }
-        }
-        Ok(deliveries)
+        Ok(listeners
+            .iter()
+            .filter(|registration| registration.matches_frame(&frame))
+            .map(|registration| (Arc::clone(&registration.listener), frame.clone()))
+            .collect())
     }
 
     fn pop_queued_pull_sample(
@@ -333,8 +358,6 @@ struct ListenerRegistration {
     source_filter: UUri,
     sink_filter: Option<UUri>,
     listener: Arc<dyn UZeroCopyListener<LolaRxLease>>,
-    #[cfg(feature = "lola-ffi")]
-    subscriber: NativeSubscriber,
 }
 
 impl ListenerRegistration {
@@ -342,17 +365,12 @@ impl ListenerRegistration {
         source_filter: &UUri,
         sink_filter: Option<&UUri>,
         listener: Arc<dyn UZeroCopyListener<LolaRxLease>>,
-        _config: &LolaTransportConfig,
-    ) -> Result<Self, UStatus> {
-        #[cfg(feature = "lola-ffi")]
-        let subscriber = NativeSubscriber::new(_config)?;
-        Ok(Self {
+    ) -> Self {
+        Self {
             source_filter: source_filter.to_owned(),
             sink_filter: sink_filter.map(ToOwned::to_owned),
             listener,
-            #[cfg(feature = "lola-ffi")]
-            subscriber,
-        })
+        }
     }
 
     #[cfg(any(feature = "test-stub", feature = "lola-ffi"))]
@@ -503,8 +521,7 @@ impl UZeroCopyTransportImpl for UTransportLola {
                 "LoLa listener already registered for filters",
             ));
         }
-        let registration =
-            ListenerRegistration::new(source_filter, sink_filter, listener, &self.config)?;
+        let registration = ListenerRegistration::new(source_filter, sink_filter, listener);
         listeners.push(registration);
         drop(listeners);
 
@@ -539,6 +556,7 @@ impl UZeroCopyTransportImpl for UTransportLola {
 
         #[cfg(feature = "lola-ffi")]
         if should_stop {
+            self.drop_listener_subscriber();
             if let Some(task) = self
                 .listener_task
                 .lock()
@@ -813,6 +831,26 @@ mod tests {
         send_payload(&transport, topic, b"listen");
 
         assert_eq!(listener.payloads(), vec![b"listen".to_vec()]);
+    }
+
+    #[cfg(feature = "test-stub")]
+    #[test]
+    fn test_stub_registered_listeners_receive_matching_payload_fanout() {
+        let transport = UTransportLola::build(test_config()).unwrap();
+        let topic = UUri::try_from("//vehicle/4210/1/9017").expect("valid URI");
+        let listener_a = Arc::new(RecordingListener::default());
+        let listener_b = Arc::new(RecordingListener::default());
+        let registration_a: Arc<dyn UZeroCopyListener<LolaRxLease>> = listener_a.clone();
+        let registration_b: Arc<dyn UZeroCopyListener<LolaRxLease>> = listener_b.clone();
+
+        block_on_ready(transport.register_zero_copy_listener(&topic, None, registration_a))
+            .unwrap();
+        block_on_ready(transport.register_zero_copy_listener(&topic, None, registration_b))
+            .unwrap();
+        send_payload(&transport, topic, b"fanout");
+
+        assert_eq!(listener_a.payloads(), vec![b"fanout".to_vec()]);
+        assert_eq!(listener_b.payloads(), vec![b"fanout".to_vec()]);
     }
 
     #[cfg(feature = "test-stub")]

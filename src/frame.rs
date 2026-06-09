@@ -6,6 +6,8 @@
  * SPDX-License-Identifier: Apache-2.0
  ********************************************************************************/
 
+#[cfg(feature = "lola-ffi")]
+use std::sync::Arc;
 use std::{io::Cursor, mem::MaybeUninit};
 
 use protobuf::Message;
@@ -296,13 +298,37 @@ pub struct LolaRxLease {
     payload_len: usize,
 }
 
+impl Clone for LolaRxLease {
+    fn clone(&self) -> Self {
+        Self {
+            metadata: self.metadata.clone(),
+            sample: self.sample.clone(),
+            payload_offset: self.payload_offset,
+            payload_len: self.payload_len,
+        }
+    }
+}
+
 enum LolaRxStorage {
     #[cfg(feature = "test-stub")]
     Vec(Vec<u8>),
     #[cfg(feature = "lola-ffi")]
-    Native(NativeRxSample),
+    Native(Arc<NativeRxSample>),
     #[cfg(not(any(feature = "test-stub", feature = "lola-ffi")))]
     Unavailable,
+}
+
+impl Clone for LolaRxStorage {
+    fn clone(&self) -> Self {
+        match self {
+            #[cfg(feature = "test-stub")]
+            Self::Vec(sample) => Self::Vec(sample.clone()),
+            #[cfg(feature = "lola-ffi")]
+            Self::Native(sample) => Self::Native(Arc::clone(sample)),
+            #[cfg(not(any(feature = "test-stub", feature = "lola-ffi")))]
+            Self::Unavailable => Self::Unavailable,
+        }
+    }
 }
 
 impl LolaRxStorage {
@@ -339,7 +365,7 @@ impl LolaRxLease {
         let (metadata, payload_offset, payload_len) = read_frame_header(sample.as_slice())?;
         let lease = Self {
             metadata,
-            sample: LolaRxStorage::Native(sample),
+            sample: LolaRxStorage::Native(Arc::new(sample)),
             payload_offset,
             payload_len,
         };

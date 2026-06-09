@@ -325,6 +325,10 @@ pub(crate) struct NativeRxSample {
 
 // SAFETY: RX sample ownership moves as an opaque native handle.
 unsafe impl Send for NativeRxSample {}
+// SAFETY: RX samples are immutable after the bridge returns them. Shared Rust
+// references only read the sample data pointer and size and never mutate native
+// state; destruction still happens exactly once when the owning wrapper drops.
+unsafe impl Sync for NativeRxSample {}
 
 impl NativeRxSample {
     fn new(
