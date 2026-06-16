@@ -17,11 +17,8 @@ lola-build-from-source = ["lola-ffi"]
 lola-ffi = []
 zero-copy = []
 benchmark-owned = ["up-rust/owned-frame-transport"]
-payload-contract-benchmarks = ["up-rust/payload-contract-fixtures"]
-payload-contract-large-benchmarks = [
-    "payload-contract-benchmarks",
-    "up-rust/payload-contract-large-fixtures",
-]
+payload-contract-benchmarks = []
+payload-contract-large-benchmarks = ["payload-contract-benchmarks"]
 test-stub = []
 
 [[bench]]
@@ -32,10 +29,11 @@ harness = false
 async-trait = "0.1"
 protobuf = { version = "3.7.2", features = ["with-bytes"] }
 tokio = { version = "1.45.1", default-features = false, features = ["rt", "sync", "time"] }
-up-rust = { git = "https://github.com/PLeVasseur/up-rust.git", rev = "0ad33e8a8508dd7c189780e0ac51095ece8995aa" }
+up-rust = { git = "ssh://git@github.com/PLeVasseur/up-rust.git", rev = "26d70ef45af61fdd17d3e130845a5be155154b2e" }
 
 [dev-dependencies]
 criterion = { version = "0.5.1", features = ["csv_output"] }
+up-wire-xcdrv2 = { git = "ssh://git@github.com/PLeVasseur/up-wire-xcdrv2-rust.git", rev = "4092ba75e24f4f96b7088f37016c78ac75aa5c05" }
 
 [package.metadata.docs.rs]
 no-default-features = true

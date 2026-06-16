@@ -13,8 +13,9 @@ use async_trait::async_trait;
 #[cfg(feature = "lola-ffi")]
 use tokio::task::JoinHandle;
 use up_rust::{
-    UCode, UFrameView, UStatus, UUri, UZeroCopyListener, UZeroCopyTransportImpl,
-    UZeroCopyUninitTransportImpl, ValidatedTxLoanSpec,
+    PreparedTxLoanSpec, UCode, UEncodedZeroCopyListener, UFrameView, UStatus, UUri,
+    UZeroCopyListener, UZeroCopyTransportCore, UZeroCopyTransportImpl,
+    UZeroCopyUninitTransportCore, UZeroCopyUninitTransportImpl, ValidatedTxLoanSpec,
 };
 
 #[cfg(any(feature = "test-stub", feature = "lola-ffi"))]
@@ -36,8 +37,8 @@ pub struct UTransportLola {
     #[cfg(feature = "lola-ffi")]
     self_ref: Weak<UTransportLola>,
     #[cfg(feature = "test-stub")]
-    pending_samples: Mutex<VecDeque<Vec<u8>>>,
-    listeners: Mutex<Vec<ListenerRegistration>>,
+    pending_samples: Mutex<VecDeque<LolaRxLease>>,
+    encoded_listeners: Mutex<Vec<EncodedListenerRegistration>>,
     pull_mismatch_queue: Mutex<PullMismatchQueueState>,
     #[cfg(feature = "lola-ffi")]
     listener_task: Mutex<Option<JoinHandle<()>>>,
@@ -47,6 +48,12 @@ pub struct UTransportLola {
     subscriber: Mutex<Option<NativeSubscriber>>,
     #[cfg(feature = "lola-ffi")]
     listener_subscriber: Mutex<Option<NativeSubscriber>>,
+}
+
+/// Selected-wire zero-copy core for LoLa native-frame transport operations.
+#[derive(Clone)]
+pub struct LolaZeroCopyCore {
+    inner: Arc<UTransportLola>,
 }
 
 impl UTransportLola {
@@ -66,7 +73,7 @@ impl UTransportLola {
             self_ref: _self_ref.clone(),
             #[cfg(feature = "test-stub")]
             pending_samples: Mutex::new(VecDeque::new()),
-            listeners: Mutex::new(Vec::new()),
+            encoded_listeners: Mutex::new(Vec::new()),
             pull_mismatch_queue: Mutex::new(PullMismatchQueueState::default()),
             #[cfg(feature = "lola-ffi")]
             listener_task: Mutex::new(None),
@@ -83,6 +90,14 @@ impl UTransportLola {
     #[must_use]
     pub fn config(&self) -> &LolaTransportConfig {
         &self.config
+    }
+
+    /// Returns a cloneable core for `.with_wire(W)` selected-wire operations.
+    #[must_use]
+    pub fn zero_copy_core(self: &Arc<Self>) -> LolaZeroCopyCore {
+        LolaZeroCopyCore {
+            inner: Arc::clone(self),
+        }
     }
 
     /// Returns diagnostics for the bounded pull mismatch queue.
@@ -277,27 +292,21 @@ impl UTransportLola {
     }
 
     #[cfg(feature = "test-stub")]
-    async fn deliver_test_stub_sample(&self, sample: &[u8]) -> Result<(), UStatus> {
+    async fn deliver_test_stub_encoded_frame(&self, frame: &LolaRxLease) -> Result<(), UStatus> {
         let listeners = {
             let listeners = self
-                .listeners
+                .encoded_listeners
                 .lock()
-                .expect("LoLa listener registry lock poisoned");
-            if listeners.is_empty() {
-                return Ok(());
-            }
-            let probe = LolaRxLease::from_vec(sample.to_vec())?;
+                .expect("LoLa encoded listener registry lock poisoned");
             listeners
                 .iter()
-                .filter(|registration| registration.matches_frame(&probe))
+                .filter(|registration| registration.matches_frame(frame))
                 .map(|registration| Arc::clone(&registration.listener))
                 .collect::<Vec<_>>()
         };
 
         for listener in listeners {
-            listener
-                .on_receive_zero_copy(LolaRxLease::from_vec(sample.to_vec())?)
-                .await;
+            listener.on_receive_encoded_zero_copy(frame.clone()).await;
         }
         Ok(())
     }
@@ -354,17 +363,17 @@ pub struct LolaPullMismatchQueueDiagnostics {
     pub last_mismatch_reason: Option<String>,
 }
 
-struct ListenerRegistration {
+struct EncodedListenerRegistration {
     source_filter: UUri,
     sink_filter: Option<UUri>,
-    listener: Arc<dyn UZeroCopyListener<LolaRxLease>>,
+    listener: Arc<dyn UEncodedZeroCopyListener<LolaRxLease>>,
 }
 
-impl ListenerRegistration {
+impl EncodedListenerRegistration {
     fn new(
         source_filter: &UUri,
         sink_filter: Option<&UUri>,
-        listener: Arc<dyn UZeroCopyListener<LolaRxLease>>,
+        listener: Arc<dyn UEncodedZeroCopyListener<LolaRxLease>>,
     ) -> Self {
         Self {
             source_filter: source_filter.to_owned(),
@@ -382,7 +391,7 @@ impl ListenerRegistration {
         &self,
         source_filter: &UUri,
         sink_filter: Option<&UUri>,
-        listener: &Arc<dyn UZeroCopyListener<LolaRxLease>>,
+        listener: &Arc<dyn UEncodedZeroCopyListener<LolaRxLease>>,
     ) -> bool {
         self.source_filter == *source_filter
             && self.sink_filter.as_ref() == sink_filter
@@ -407,52 +416,13 @@ impl UZeroCopyTransportImpl for UTransportLola {
     type Rx = LolaRxLease;
 
     async fn loan_validated_tx(&self, spec: ValidatedTxLoanSpec) -> Result<Self::Tx, UStatus> {
-        let metadata = spec.metadata().clone();
-        let payload_len = spec.payload_len();
-        let alignment = spec.payload_alignment();
-        self.validate_payload_alignment(alignment)?;
-
-        #[cfg(feature = "lola-ffi")]
-        {
-            let sample = self.native.loan_sample()?;
-            return LolaTxLoan::new_native(metadata, sample, payload_len, alignment);
-        }
-
-        #[cfg(all(feature = "test-stub", not(feature = "lola-ffi")))]
-        {
-            return LolaTxLoan::new_vec(metadata, self.config.sample_size, payload_len, alignment);
-        }
-
-        #[cfg(not(any(feature = "test-stub", feature = "lola-ffi")))]
-        {
-            let _ = (metadata, payload_len);
-            Err(backend_unavailable())
-        }
+        let _ = spec;
+        Err(selected_wire_required())
     }
 
     async fn send_validated_zero_copy(&self, buffer: Self::Tx) -> Result<(), UStatus> {
-        #[cfg(feature = "lola-ffi")]
-        {
-            let loan = buffer.into_native()?;
-            return self.native.send(loan);
-        }
-
-        #[cfg(all(feature = "test-stub", not(feature = "lola-ffi")))]
-        {
-            let sample = buffer.into_vec();
-            self.deliver_test_stub_sample(&sample).await?;
-            self.pending_samples
-                .lock()
-                .expect("LoLa test-stub pending sample lock poisoned")
-                .push_back(sample);
-            return Ok(());
-        }
-
-        #[cfg(not(any(feature = "test-stub", feature = "lola-ffi")))]
-        {
-            let _ = buffer;
-            Err(backend_unavailable())
-        }
+        let _ = buffer;
+        Err(selected_wire_required())
     }
 
     async fn receive_validated_zero_copy(
@@ -478,18 +448,17 @@ impl UZeroCopyTransportImpl for UTransportLola {
         #[cfg(all(feature = "test-stub", not(feature = "lola-ffi")))]
         {
             loop {
-                let sample = self
+                let frame = self
                     .pending_samples
                     .lock()
                     .expect("LoLa test-stub pending sample lock poisoned")
                     .pop_front();
-                let Some(sample) = sample else {
+                let Some(frame) = frame else {
                     return Err(UStatus::fail_with_code(
                         UCode::NotFound,
                         "no LoLa sample available",
                     ));
                 };
-                let frame = LolaRxLease::from_vec(sample)?;
                 if frame_matches(&frame, source_filter, sink_filter) {
                     return Ok(frame);
                 }
@@ -509,26 +478,8 @@ impl UZeroCopyTransportImpl for UTransportLola {
         sink_filter: Option<&UUri>,
         listener: Arc<dyn UZeroCopyListener<Self::Rx>>,
     ) -> Result<(), UStatus> {
-        let mut listeners = self
-            .listeners
-            .lock()
-            .expect("LoLa listener registry lock poisoned");
-        if listeners.iter().any(|registration| {
-            registration.has_same_identity(source_filter, sink_filter, &listener)
-        }) {
-            return Err(UStatus::fail_with_code(
-                UCode::AlreadyExists,
-                "LoLa listener already registered for filters",
-            ));
-        }
-        let registration = ListenerRegistration::new(source_filter, sink_filter, listener);
-        listeners.push(registration);
-        drop(listeners);
-
-        #[cfg(feature = "lola-ffi")]
-        self.ensure_listener_task()?;
-
-        Ok(())
+        let _ = (source_filter, sink_filter, listener);
+        Err(selected_wire_required())
     }
 
     async fn unregister_validated_zero_copy_listener(
@@ -537,17 +488,147 @@ impl UZeroCopyTransportImpl for UTransportLola {
         sink_filter: Option<&UUri>,
         listener: Arc<dyn UZeroCopyListener<Self::Rx>>,
     ) -> Result<(), UStatus> {
+        let _ = (source_filter, sink_filter, listener);
+        Err(selected_wire_required())
+    }
+}
+
+#[async_trait]
+impl UZeroCopyUninitTransportImpl for UTransportLola {
+    type UninitTx = LolaUninitTxLoan;
+
+    async fn loan_validated_uninit_tx(
+        &self,
+        spec: ValidatedTxLoanSpec,
+    ) -> Result<Self::UninitTx, UStatus> {
+        let _ = spec;
+        Err(selected_wire_required())
+    }
+}
+
+#[async_trait]
+impl UZeroCopyTransportCore for UTransportLola {
+    type Tx = LolaTxLoan;
+    type Rx = LolaRxLease;
+
+    async fn loan_prepared_tx(&self, spec: PreparedTxLoanSpec) -> Result<Self::Tx, UStatus> {
+        let metadata = spec.metadata().clone();
+        let encoded_metadata = spec.encoded_metadata().to_vec();
+        let payload_len = spec.payload_len();
+        let alignment = spec.payload_alignment();
+        self.validate_payload_alignment(alignment)?;
+
+        #[cfg(feature = "lola-ffi")]
+        {
+            let sample = self.native.loan_sample()?;
+            return LolaTxLoan::new_native(
+                metadata,
+                encoded_metadata,
+                sample,
+                payload_len,
+                alignment,
+            );
+        }
+
+        #[cfg(all(feature = "test-stub", not(feature = "lola-ffi")))]
+        {
+            return LolaTxLoan::new_vec(
+                metadata,
+                encoded_metadata,
+                self.config.sample_size,
+                payload_len,
+                alignment,
+            );
+        }
+
+        #[cfg(not(any(feature = "test-stub", feature = "lola-ffi")))]
+        {
+            let _ = (metadata, encoded_metadata, payload_len);
+            Err(backend_unavailable())
+        }
+    }
+
+    async fn send_prepared_zero_copy(&self, buffer: Self::Tx) -> Result<(), UStatus> {
+        #[cfg(feature = "lola-ffi")]
+        {
+            let loan = buffer.into_native()?;
+            return self.native.send(loan);
+        }
+
+        #[cfg(all(feature = "test-stub", not(feature = "lola-ffi")))]
+        {
+            let frame = buffer.clone_as_rx();
+            self.deliver_test_stub_encoded_frame(&frame).await?;
+            self.pending_samples
+                .lock()
+                .expect("LoLa test-stub pending sample lock poisoned")
+                .push_back(frame);
+            return Ok(());
+        }
+
+        #[cfg(not(any(feature = "test-stub", feature = "lola-ffi")))]
+        {
+            let _ = buffer;
+            Err(backend_unavailable())
+        }
+    }
+
+    async fn receive_encoded_zero_copy(
+        &self,
+        source_filter: &UUri,
+        sink_filter: Option<&UUri>,
+    ) -> Result<Self::Rx, UStatus> {
+        UZeroCopyTransportImpl::receive_validated_zero_copy(self, source_filter, sink_filter).await
+    }
+
+    async fn register_encoded_zero_copy_listener(
+        &self,
+        source_filter: &UUri,
+        sink_filter: Option<&UUri>,
+        listener: Arc<dyn UEncodedZeroCopyListener<Self::Rx>>,
+    ) -> Result<(), UStatus> {
+        let mut listeners = self
+            .encoded_listeners
+            .lock()
+            .expect("LoLa encoded listener registry lock poisoned");
+        if listeners.iter().any(|registration| {
+            registration.has_same_identity(source_filter, sink_filter, &listener)
+        }) {
+            return Err(UStatus::fail_with_code(
+                UCode::AlreadyExists,
+                "LoLa encoded listener already registered for filters",
+            ));
+        }
+        listeners.push(EncodedListenerRegistration::new(
+            source_filter,
+            sink_filter,
+            listener,
+        ));
+        drop(listeners);
+
+        #[cfg(feature = "lola-ffi")]
+        self.ensure_listener_task()?;
+
+        Ok(())
+    }
+
+    async fn unregister_encoded_zero_copy_listener(
+        &self,
+        source_filter: &UUri,
+        sink_filter: Option<&UUri>,
+        listener: Arc<dyn UEncodedZeroCopyListener<Self::Rx>>,
+    ) -> Result<(), UStatus> {
         let should_stop = {
             let mut listeners = self
-                .listeners
+                .encoded_listeners
                 .lock()
-                .expect("LoLa listener registry lock poisoned");
+                .expect("LoLa encoded listener registry lock poisoned");
             let Some(index) = listeners.iter().position(|registration| {
                 registration.has_same_identity(source_filter, sink_filter, &listener)
             }) else {
                 return Err(UStatus::fail_with_code(
                     UCode::NotFound,
-                    "no such LoLa listener registered for filters",
+                    "no such LoLa encoded listener registered for filters",
                 ));
             };
             listeners.remove(index);
@@ -575,14 +656,15 @@ impl UZeroCopyTransportImpl for UTransportLola {
 }
 
 #[async_trait]
-impl UZeroCopyUninitTransportImpl for UTransportLola {
+impl UZeroCopyUninitTransportCore for UTransportLola {
     type UninitTx = LolaUninitTxLoan;
 
-    async fn loan_validated_uninit_tx(
+    async fn loan_prepared_uninit_tx(
         &self,
-        spec: ValidatedTxLoanSpec,
+        spec: PreparedTxLoanSpec,
     ) -> Result<Self::UninitTx, UStatus> {
         let metadata = spec.metadata().clone();
+        let encoded_metadata = spec.encoded_metadata().to_vec();
         let payload_len = spec.payload_len();
         let alignment = spec.payload_alignment();
         self.validate_payload_alignment(alignment)?;
@@ -590,13 +672,20 @@ impl UZeroCopyUninitTransportImpl for UTransportLola {
         #[cfg(feature = "lola-ffi")]
         {
             let sample = self.native.loan_sample()?;
-            return LolaUninitTxLoan::new_native(metadata, sample, payload_len, alignment);
+            return LolaUninitTxLoan::new_native(
+                metadata,
+                encoded_metadata,
+                sample,
+                payload_len,
+                alignment,
+            );
         }
 
         #[cfg(all(feature = "test-stub", not(feature = "lola-ffi")))]
         {
             return LolaUninitTxLoan::new_vec(
                 metadata,
+                encoded_metadata,
                 self.config.sample_size,
                 payload_len,
                 alignment,
@@ -605,10 +694,75 @@ impl UZeroCopyUninitTransportImpl for UTransportLola {
 
         #[cfg(not(any(feature = "test-stub", feature = "lola-ffi")))]
         {
-            let _ = (metadata, payload_len);
+            let _ = (metadata, encoded_metadata, payload_len);
             Err(backend_unavailable())
         }
     }
+}
+
+#[async_trait]
+impl UZeroCopyTransportCore for LolaZeroCopyCore {
+    type Tx = LolaTxLoan;
+    type Rx = LolaRxLease;
+
+    async fn loan_prepared_tx(&self, spec: PreparedTxLoanSpec) -> Result<Self::Tx, UStatus> {
+        self.inner.loan_prepared_tx(spec).await
+    }
+
+    async fn send_prepared_zero_copy(&self, buffer: Self::Tx) -> Result<(), UStatus> {
+        self.inner.send_prepared_zero_copy(buffer).await
+    }
+
+    async fn receive_encoded_zero_copy(
+        &self,
+        source_filter: &UUri,
+        sink_filter: Option<&UUri>,
+    ) -> Result<Self::Rx, UStatus> {
+        self.inner
+            .receive_encoded_zero_copy(source_filter, sink_filter)
+            .await
+    }
+
+    async fn register_encoded_zero_copy_listener(
+        &self,
+        source_filter: &UUri,
+        sink_filter: Option<&UUri>,
+        listener: Arc<dyn UEncodedZeroCopyListener<Self::Rx>>,
+    ) -> Result<(), UStatus> {
+        self.inner
+            .register_encoded_zero_copy_listener(source_filter, sink_filter, listener)
+            .await
+    }
+
+    async fn unregister_encoded_zero_copy_listener(
+        &self,
+        source_filter: &UUri,
+        sink_filter: Option<&UUri>,
+        listener: Arc<dyn UEncodedZeroCopyListener<Self::Rx>>,
+    ) -> Result<(), UStatus> {
+        self.inner
+            .unregister_encoded_zero_copy_listener(source_filter, sink_filter, listener)
+            .await
+    }
+}
+
+#[async_trait]
+impl UZeroCopyUninitTransportCore for LolaZeroCopyCore {
+    type UninitTx = LolaUninitTxLoan;
+
+    async fn loan_prepared_uninit_tx(
+        &self,
+        spec: PreparedTxLoanSpec,
+    ) -> Result<Self::UninitTx, UStatus> {
+        self.inner.loan_prepared_uninit_tx(spec).await
+    }
+}
+
+fn selected_wire_required() -> UStatus {
+    UStatus::fail_with_code(
+        UCode::FailedPrecondition,
+        "use UTransportLola.with_wire(W) for selected-wire LoLa transport operations",
+    )
 }
 
 #[cfg(not(any(feature = "test-stub", feature = "lola-ffi")))]
@@ -617,282 +771,4 @@ fn backend_unavailable() -> UStatus {
         UCode::FailedPrecondition,
         "enable the LoLa test-stub or native backend feature to use zero-copy samples",
     )
-}
-
-#[cfg(all(
-    test,
-    any(
-        all(feature = "test-stub", not(feature = "lola-ffi")),
-        not(any(feature = "test-stub", feature = "lola-ffi"))
-    )
-))]
-mod tests {
-    use std::{future::Future, sync::Arc, task::Wake};
-
-    #[cfg(feature = "test-stub")]
-    use async_trait::async_trait;
-    #[cfg(feature = "test-stub")]
-    use std::sync::Mutex;
-    use up_rust::{
-        try_project_umessage_to_frame_metadata, UCode, UMessageBuilder, UPayloadFormat,
-        UTxLoanSpec, UUri, UZeroCopyTransport,
-    };
-    #[cfg(feature = "test-stub")]
-    use up_rust::{
-        UFrameView, UTxBuffer, UUninitTxBuffer, UZeroCopyListener, UZeroCopyUninitTransport,
-    };
-
-    use super::*;
-
-    struct NoopWake;
-
-    impl Wake for NoopWake {
-        fn wake(self: Arc<Self>) {}
-    }
-
-    fn block_on_ready<T>(future: impl Future<Output = T>) -> T {
-        let waker = std::task::Waker::from(Arc::new(NoopWake));
-        let mut context = std::task::Context::from_waker(&waker);
-        let mut future = Box::pin(future);
-        match future.as_mut().poll(&mut context) {
-            std::task::Poll::Ready(value) => value,
-            std::task::Poll::Pending => panic!("LoLa test future unexpectedly yielded pending"),
-        }
-    }
-
-    fn test_config() -> LolaTransportConfig {
-        LolaTransportConfig {
-            local_authority: "vehicle".to_string(),
-            instance_specifier: "lola/service/instance".to_string(),
-            service_type: "uprotocol.LoLa".to_string(),
-            event_name: "UProtocolFrame".to_string(),
-            sample_size: 256,
-            sample_alignment: 8,
-            max_samples: 8,
-            pull_mismatch_queue_capacity: LolaTransportConfig::DEFAULT_PULL_MISMATCH_QUEUE_CAPACITY,
-            pull_mismatch_queue_full_policy:
-                LolaTransportConfig::DEFAULT_PULL_MISMATCH_QUEUE_FULL_POLICY,
-            mw_com_config_path: None,
-        }
-    }
-
-    fn tx_spec_for(topic: UUri, payload_len: usize, payload_alignment: usize) -> UTxLoanSpec {
-        let message = UMessageBuilder::publish(topic)
-            .build_with_payload(Vec::new(), UPayloadFormat::Raw)
-            .expect("valid publish message");
-        let metadata = try_project_umessage_to_frame_metadata(&message).expect("valid metadata");
-        UTxLoanSpec::payload(metadata, payload_len, payload_alignment).expect("valid loan spec")
-    }
-
-    fn tx_spec(payload_len: usize, payload_alignment: usize) -> UTxLoanSpec {
-        tx_spec_for(
-            UUri::try_from("//vehicle/4210/1/9008").expect("valid URI"),
-            payload_len,
-            payload_alignment,
-        )
-    }
-
-    #[cfg(feature = "test-stub")]
-    fn send_payload(transport: &Arc<UTransportLola>, topic: UUri, payload: &[u8]) {
-        block_on_ready(async {
-            let mut loan = transport
-                .loan_tx(tx_spec_for(topic, payload.len(), 1))
-                .await
-                .unwrap();
-            loan.payload_mut().copy_from_slice(payload);
-            transport.send_zero_copy(loan).await.unwrap();
-        });
-    }
-
-    #[cfg(feature = "test-stub")]
-    #[derive(Default)]
-    struct RecordingListener {
-        payloads: Mutex<Vec<Vec<u8>>>,
-    }
-
-    #[cfg(feature = "test-stub")]
-    impl RecordingListener {
-        fn payloads(&self) -> Vec<Vec<u8>> {
-            self.payloads.lock().unwrap().clone()
-        }
-    }
-
-    #[cfg(feature = "test-stub")]
-    #[async_trait]
-    impl UZeroCopyListener<LolaRxLease> for RecordingListener {
-        async fn on_receive_zero_copy(&self, frame: LolaRxLease) {
-            self.payloads
-                .lock()
-                .unwrap()
-                .push(frame.try_contiguous_payload().unwrap().to_vec());
-        }
-    }
-
-    #[cfg(feature = "test-stub")]
-    #[test]
-    fn test_stub_send_zero_copy_stores_initialized_sample() {
-        let transport = UTransportLola::build(test_config()).unwrap();
-        let mut loan = block_on_ready(transport.loan_tx(tx_spec(3, 1))).unwrap();
-        loan.payload_mut().copy_from_slice(b"abc");
-
-        block_on_ready(transport.send_zero_copy(loan)).unwrap();
-
-        let samples = transport.pending_samples.lock().unwrap();
-        assert_eq!(samples.len(), 1);
-        let lease = LolaRxLease::from_vec(samples.front().unwrap().clone()).unwrap();
-        assert_eq!(lease.try_contiguous_payload(), Some(b"abc".as_slice()));
-    }
-
-    #[cfg(feature = "test-stub")]
-    #[test]
-    fn test_stub_send_zero_copy_commits_uninit_payload_without_zeroing_payload() {
-        let transport = UTransportLola::build(test_config()).unwrap();
-        let mut loan = block_on_ready(transport.loan_uninit_tx(tx_spec(3, 1))).unwrap();
-        for (slot, byte) in loan.payload_uninit_mut().iter_mut().zip(*b"xyz") {
-            slot.write(byte);
-        }
-
-        // SAFETY: The test wrote exactly every visible application payload byte.
-        let loan = unsafe { loan.assume_payload_init() };
-        block_on_ready(transport.send_zero_copy(loan)).unwrap();
-
-        let samples = transport.pending_samples.lock().unwrap();
-        assert_eq!(samples.len(), 1);
-        let lease = LolaRxLease::from_vec(samples.front().unwrap().clone()).unwrap();
-        assert_eq!(lease.try_contiguous_payload(), Some(b"xyz".as_slice()));
-    }
-
-    #[cfg(feature = "test-stub")]
-    #[test]
-    fn test_stub_receive_zero_copy_returns_matching_sample() {
-        let transport = UTransportLola::build(test_config()).unwrap();
-        let topic = UUri::try_from("//vehicle/4210/1/9009").expect("valid URI");
-        send_payload(&transport, topic.clone(), b"rx");
-
-        let frame = block_on_ready(transport.receive_zero_copy(&topic, None)).unwrap();
-
-        assert_eq!(frame.try_contiguous_payload(), Some(b"rx".as_slice()));
-    }
-
-    #[cfg(feature = "test-stub")]
-    #[test]
-    fn test_stub_pull_receive_preserves_nonmatching_samples() {
-        let transport = UTransportLola::build(test_config()).unwrap();
-        let topic_a = UUri::try_from("//vehicle/4210/1/9010").expect("valid URI");
-        let topic_b = UUri::try_from("//vehicle/4210/1/9011").expect("valid URI");
-        send_payload(&transport, topic_a.clone(), b"a");
-        send_payload(&transport, topic_b.clone(), b"b");
-
-        let frame_b = block_on_ready(transport.receive_zero_copy(&topic_b, None)).unwrap();
-        assert_eq!(frame_b.try_contiguous_payload(), Some(b"b".as_slice()));
-        assert_eq!(transport.pull_mismatch_queue_diagnostics().current_depth, 1);
-
-        let frame_a = block_on_ready(transport.receive_zero_copy(&topic_a, None)).unwrap();
-        assert_eq!(frame_a.try_contiguous_payload(), Some(b"a".as_slice()));
-        assert_eq!(transport.pull_mismatch_queue_diagnostics().current_depth, 0);
-    }
-
-    #[cfg(feature = "test-stub")]
-    #[test]
-    fn test_stub_pull_mismatch_queue_can_reject_newest_when_full() {
-        let mut config = test_config();
-        config.pull_mismatch_queue_capacity = 1;
-        config.pull_mismatch_queue_full_policy =
-            LolaPullMismatchQueueFullPolicy::RejectNewestAndReport;
-        let transport = UTransportLola::build(config).unwrap();
-        let topic_a = UUri::try_from("//vehicle/4210/1/9012").expect("valid URI");
-        let topic_b = UUri::try_from("//vehicle/4210/1/9013").expect("valid URI");
-        let target = UUri::try_from("//vehicle/4210/1/9014").expect("valid URI");
-        send_payload(&transport, topic_a.clone(), b"a");
-        send_payload(&transport, topic_b, b"b");
-
-        let error = match block_on_ready(transport.receive_zero_copy(&target, None)) {
-            Ok(_) => panic!("LoLa pull receive should reject the newest mismatch"),
-            Err(error) => error,
-        };
-
-        assert_eq!(error.get_code(), UCode::ResourceExhausted);
-        let diagnostics = transport.pull_mismatch_queue_diagnostics();
-        assert_eq!(diagnostics.current_depth, 1);
-        assert_eq!(diagnostics.rejected_mismatches, 1);
-        let frame_a = block_on_ready(transport.receive_zero_copy(&topic_a, None)).unwrap();
-        assert_eq!(frame_a.try_contiguous_payload(), Some(b"a".as_slice()));
-    }
-
-    #[cfg(feature = "test-stub")]
-    #[test]
-    fn test_stub_registered_listener_receives_matching_payload() {
-        let transport = UTransportLola::build(test_config()).unwrap();
-        let topic = UUri::try_from("//vehicle/4210/1/9015").expect("valid URI");
-        let listener = Arc::new(RecordingListener::default());
-        let registration: Arc<dyn UZeroCopyListener<LolaRxLease>> = listener.clone();
-
-        block_on_ready(transport.register_zero_copy_listener(&topic, None, registration)).unwrap();
-        send_payload(&transport, topic, b"listen");
-
-        assert_eq!(listener.payloads(), vec![b"listen".to_vec()]);
-    }
-
-    #[cfg(feature = "test-stub")]
-    #[test]
-    fn test_stub_registered_listeners_receive_matching_payload_fanout() {
-        let transport = UTransportLola::build(test_config()).unwrap();
-        let topic = UUri::try_from("//vehicle/4210/1/9017").expect("valid URI");
-        let listener_a = Arc::new(RecordingListener::default());
-        let listener_b = Arc::new(RecordingListener::default());
-        let registration_a: Arc<dyn UZeroCopyListener<LolaRxLease>> = listener_a.clone();
-        let registration_b: Arc<dyn UZeroCopyListener<LolaRxLease>> = listener_b.clone();
-
-        block_on_ready(transport.register_zero_copy_listener(&topic, None, registration_a))
-            .unwrap();
-        block_on_ready(transport.register_zero_copy_listener(&topic, None, registration_b))
-            .unwrap();
-        send_payload(&transport, topic, b"fanout");
-
-        assert_eq!(listener_a.payloads(), vec![b"fanout".to_vec()]);
-        assert_eq!(listener_b.payloads(), vec![b"fanout".to_vec()]);
-    }
-
-    #[cfg(feature = "test-stub")]
-    #[test]
-    fn test_stub_unregistered_listener_stops_receiving_payloads() {
-        let transport = UTransportLola::build(test_config()).unwrap();
-        let topic = UUri::try_from("//vehicle/4210/1/9016").expect("valid URI");
-        let listener = Arc::new(RecordingListener::default());
-        let registration: Arc<dyn UZeroCopyListener<LolaRxLease>> = listener.clone();
-
-        block_on_ready(transport.register_zero_copy_listener(
-            &topic,
-            None,
-            Arc::clone(&registration),
-        ))
-        .unwrap();
-        block_on_ready(transport.unregister_zero_copy_listener(&topic, None, registration))
-            .unwrap();
-        send_payload(&transport, topic, b"ignored");
-
-        assert!(listener.payloads().is_empty());
-    }
-
-    #[cfg(feature = "test-stub")]
-    #[test]
-    fn tx_loan_rejects_alignment_larger_than_sample_alignment() {
-        let transport = UTransportLola::build(test_config()).unwrap();
-        let error = match block_on_ready(transport.loan_tx(tx_spec(1, 16))) {
-            Ok(_) => panic!("LoLa TX loan should reject excessive alignment"),
-            Err(error) => error,
-        };
-        assert_eq!(error.get_code(), UCode::InvalidArgument);
-    }
-
-    #[cfg(not(any(feature = "test-stub", feature = "lola-ffi")))]
-    #[test]
-    fn tx_loan_requires_backend_feature() {
-        let transport = UTransportLola::build(test_config()).unwrap();
-        let error = match block_on_ready(transport.loan_tx(tx_spec(1, 1))) {
-            Ok(_) => panic!("LoLa TX loan should require a backend feature"),
-            Err(error) => error,
-        };
-        assert_eq!(error.get_code(), UCode::FailedPrecondition);
-    }
 }
