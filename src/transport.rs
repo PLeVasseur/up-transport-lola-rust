@@ -177,9 +177,9 @@ impl UTransportLola {
             };
 
             if transport
-                .listeners
+                .encoded_listeners
                 .lock()
-                .expect("LoLa listener registry lock poisoned")
+                .expect("LoLa encoded listener registry lock poisoned")
                 .is_empty()
             {
                 transport.drop_listener_subscriber();
@@ -195,7 +195,7 @@ impl UTransportLola {
                 }
                 Ok(deliveries) => {
                     for (listener, frame) in deliveries {
-                        listener.on_receive_zero_copy(frame).await;
+                        listener.on_receive_encoded_zero_copy(frame).await;
                     }
                 }
                 Err(status) => {
@@ -211,16 +211,16 @@ impl UTransportLola {
     #[cfg(feature = "lola-ffi")]
     fn poll_native_listener_frames(
         &self,
-    ) -> Result<Vec<(Arc<dyn UZeroCopyListener<LolaRxLease>>, LolaRxLease)>, UStatus> {
+    ) -> Result<Vec<(Arc<dyn UEncodedZeroCopyListener<LolaRxLease>>, LolaRxLease)>, UStatus> {
         let frame = match self.receive_next_listener_frame() {
             Ok(frame) => frame,
             Err(status) if status.get_code() == UCode::NotFound => return Ok(Vec::new()),
             Err(status) => return Err(status),
         };
         let listeners = self
-            .listeners
+            .encoded_listeners
             .lock()
-            .expect("LoLa listener registry lock poisoned");
+            .expect("LoLa encoded listener registry lock poisoned");
         Ok(listeners
             .iter()
             .filter(|registration| registration.matches_frame(&frame))
