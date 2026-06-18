@@ -6,11 +6,13 @@ use async_trait::async_trait;
 use std::sync::Mutex;
 use up_rust::{
     try_project_umessage_to_frame_metadata, PayloadEncoding, PayloadFormat, ProtobufWire, UCode,
-    UFrameMetadata, UFrameView, UMessageBuilder, UPayloadFormat, UProtocolNativeWire, UTxBuffer,
-    UTxLoanSpec, UUninitTxBuffer, UUri, UWire, UWireMetadata, UWireRx, UWithWire,
-    UZeroCopyListener, UZeroCopyTransport, UZeroCopyUninitTransport, WireIdentity,
-    NATIVE_PREFIX_METADATA_LAYOUT_ID,
+    UFrameMetadata, UFrameView, UMessageBuilder, UOwnedFrame, UOwnedTransport, UPayloadFormat,
+    UProtocolNativeWire, UTxBuffer, UTxLoanSpec, UUninitTxBuffer, UUri, UWire, UWireMetadata,
+    UWireRx, UWithWire, UZeroCopyListener, UZeroCopyTransport, UZeroCopyUninitTransport,
+    WireIdentity, NATIVE_PREFIX_METADATA_LAYOUT_ID,
 };
+#[cfg(feature = "benchmark-owned")]
+use up_transport_lola_rust::LolaOwnedCore;
 use up_transport_lola_rust::{LolaRxLease, LolaTransportConfig, UTransportLola};
 use up_wire_xcdrv2::{VehicleSignalV1, XcdrV2Wire, VEHICLE_SIGNAL_V1_GOLDEN_VALUE};
 
@@ -97,6 +99,22 @@ where
             .unwrap();
         loan.payload_mut().copy_from_slice(payload);
         selected.send_zero_copy(loan).await.unwrap();
+    });
+}
+
+#[cfg(feature = "benchmark-owned")]
+fn send_owned_payload<W>(transport: &Arc<UTransportLola>, topic: UUri, payload: &[u8])
+where
+    W: UWireMetadata + PayloadFormat + Default + Send + Sync + 'static,
+{
+    block_on_ready(async {
+        let owned = LolaOwnedCore::new(transport.zero_copy_core()).with_selected_wire(W::default());
+        let frame = UOwnedFrame::with_payload(
+            metadata_with_encoding(topic, W::encoding()),
+            payload.to_vec(),
+        )
+        .unwrap();
+        owned.send_owned(frame).await.unwrap();
     });
 }
 
@@ -242,6 +260,7 @@ fn uninit_tx_round_trips_payload() {
     for (slot, byte) in loan.payload_uninit_mut().iter_mut().zip(*b"xyz") {
         slot.write(byte);
     }
+    // SAFETY: every byte in the requested payload range was initialized above.
     let loan = unsafe { loan.assume_payload_init() };
     block_on_ready(selected.send_zero_copy(loan)).unwrap();
 
@@ -280,6 +299,43 @@ fn listener_drops_wrong_wire_payload() {
     send_wire_payload::<ProtobufWire>(&transport, topic, b"drop");
 
     assert!(listener.payloads().is_empty());
+}
+
+#[cfg(feature = "benchmark-owned")]
+#[test]
+fn owned_core_round_trips_external_xcdrv2_payload() {
+    let transport = UTransportLola::build(test_config()).unwrap();
+    let topic = UUri::try_from("//vehicle/4210/1/9031").expect("valid URI");
+    send_owned_payload::<XcdrV2Wire>(
+        &transport,
+        topic.clone(),
+        &up_wire_xcdrv2::VEHICLE_SIGNAL_V1_GOLDEN_BYTES,
+    );
+
+    let owned = LolaOwnedCore::new(transport.zero_copy_core()).with_selected_wire(XcdrV2Wire);
+    let frame = block_on_ready(owned.receive_owned(&topic, None)).unwrap();
+
+    assert_eq!(
+        frame.payload_bytes(),
+        &up_wire_xcdrv2::VEHICLE_SIGNAL_V1_GOLDEN_BYTES
+    );
+}
+
+#[cfg(feature = "benchmark-owned")]
+#[test]
+fn owned_core_wrong_wire_is_rejected_before_public_receive_exposes_frame() {
+    let transport = UTransportLola::build(test_config()).unwrap();
+    let topic = UUri::try_from("//vehicle/4210/1/9032").expect("valid URI");
+    send_owned_payload::<ProtobufWire>(&transport, topic.clone(), b"protobuf bytes");
+
+    let owned =
+        LolaOwnedCore::new(transport.zero_copy_core()).with_selected_wire(UProtocolNativeWire);
+    let error = match block_on_ready(owned.receive_owned(&topic, None)) {
+        Ok(_) => panic!("wrong wire should be rejected"),
+        Err(error) => error,
+    };
+
+    assert_eq!(error.get_code(), UCode::InvalidArgument);
 }
 
 #[test]

@@ -26,7 +26,7 @@ use up_rust::{
 #[cfg(all(feature = "payload-contract-benchmarks", feature = "benchmark-owned"))]
 use up_rust::{ProtobufPayload, ProtobufWire, UOwnedFrame, UOwnedTransport};
 #[cfg(feature = "benchmark-owned")]
-use up_transport_lola_rust::BenchmarkOwnedLolaTransport;
+use up_transport_lola_rust::LolaOwnedCore;
 use up_transport_lola_rust::{LolaTransportConfig, LolaZeroCopyCore, UTransportLola};
 
 const BENCH_TIMEOUT: Duration = Duration::from_secs(5);
@@ -152,9 +152,9 @@ struct PayloadContractAck {
 struct BenchTransports {
     zero_copy: UWireTransport<LolaZeroCopyCore, StableContainerWireFormat>,
     #[cfg(feature = "benchmark-owned")]
-    protobuf_owned: Arc<BenchmarkOwnedLolaTransport<ProtobufWire>>,
+    protobuf_owned: Arc<UWireTransport<LolaOwnedCore, ProtobufWire>>,
     #[cfg(feature = "benchmark-owned")]
-    stable_owned: Arc<BenchmarkOwnedLolaTransport<StableContainerWireFormat>>,
+    stable_owned: Arc<UWireTransport<LolaOwnedCore, StableContainerWireFormat>>,
 }
 
 impl BenchTransports {
@@ -164,12 +164,11 @@ impl BenchTransports {
         let core = physical.zero_copy_core();
         let zero_copy = core.clone().with_wire(StableContainerWireFormat);
         #[cfg(feature = "benchmark-owned")]
-        let protobuf_owned = Arc::new(BenchmarkOwnedLolaTransport::new(core.clone(), ProtobufWire));
+        let protobuf_owned =
+            Arc::new(LolaOwnedCore::new(core.clone()).with_selected_wire(ProtobufWire));
         #[cfg(feature = "benchmark-owned")]
-        let stable_owned = Arc::new(BenchmarkOwnedLolaTransport::new(
-            core,
-            StableContainerWireFormat,
-        ));
+        let stable_owned =
+            Arc::new(LolaOwnedCore::new(core).with_selected_wire(StableContainerWireFormat));
         Self {
             zero_copy,
             #[cfg(feature = "benchmark-owned")]

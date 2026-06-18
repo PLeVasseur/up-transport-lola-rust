@@ -26,6 +26,7 @@ TRANSPORT_BENCH_REPORT_DIR="${TRANSPORT_BENCH_REPORT_DIR:-$DEFAULT_REPORT_DIR}"
 CRITERION_ARGS="${CRITERION_ARGS:-$DEFAULT_CRITERION_ARGS}"
 BENCH_PIN_PREFIX="${BENCH_PIN_PREFIX:-}"
 CARGO_CMD="${CARGO:-cargo}"
+LOLA_BENCH_BACKEND="${LOLA_BENCH_BACKEND:-native}"
 
 usage() {
     cat <<'USAGE'
@@ -43,10 +44,21 @@ Environment:
   BENCH_PIN_PREFIX            Optional command prefix for CPU pinning, etc.
   BAZEL                       Bazel/Bazelisk path for bundled LoLa bridge builds.
   CARGO                       Cargo binary. Default: cargo.
+  LOLA_BENCH_BACKEND          native or test-stub. Default: native.
 
 If BAZEL is unset, the script uses the repo-local Bazelisk installed by
 scripts/run-native-validation.sh bootstrap when available.
 USAGE
+}
+
+validate_backend() {
+    case "$LOLA_BENCH_BACKEND" in
+        native | test-stub) ;;
+        *)
+            printf 'LOLA_BENCH_BACKEND must be one of native, test-stub\n' >&2
+            exit 2
+            ;;
+    esac
 }
 
 validate_suite() {
@@ -123,6 +135,12 @@ repo_bazelisk() {
 }
 
 resolve_bazel() {
+    validate_backend
+    if [[ "$LOLA_BENCH_BACKEND" == "test-stub" ]]; then
+        printf '%s\n' "N/A"
+        return
+    fi
+
     if [[ -n "${BAZEL:-}" ]]; then
         printf '%s\n' "$BAZEL"
         return
@@ -148,6 +166,16 @@ resolve_bazel() {
     exit 2
 }
 
+cargo_feature_args() {
+    local features="$1"
+    validate_backend
+    if [[ "$LOLA_BENCH_BACKEND" == "test-stub" ]]; then
+        printf '%s\n' "--no-default-features --features ${features},test-stub"
+    else
+        printf '%s\n' "--features ${features}"
+    fi
+}
+
 run_cargo_bench() {
     local path="$1"
     local profile="$2"
@@ -157,6 +185,9 @@ run_cargo_bench() {
     features="$(cargo_features "$path")"
     local resolved_bazel
     resolved_bazel="$(resolve_bazel)"
+    local feature_args
+    feature_args="$(cargo_feature_args "$features")"
+    read -r -a feature_parts <<<"$feature_args"
     local cargo_parts
     read -r -a cargo_parts <<<"$CARGO_CMD"
 
@@ -165,13 +196,15 @@ run_cargo_bench() {
         read -r -a pin_parts <<<"$BENCH_PIN_PREFIX"
         TRANSPORT_BENCH_SUITE="$TRANSPORT_BENCH_SUITE" \
             LOLA_BENCH_PROFILE="$profile" \
+            LOLA_BENCH_BACKEND="$LOLA_BENCH_BACKEND" \
             BAZEL="$resolved_bazel" \
-            "${pin_parts[@]}" "${cargo_parts[@]}" bench --features "$features" --bench transport_criterion -- "${criterion_parts[@]}" "$@"
+            "${pin_parts[@]}" "${cargo_parts[@]}" bench "${feature_parts[@]}" --bench transport_criterion -- "${criterion_parts[@]}" "$@"
     else
         TRANSPORT_BENCH_SUITE="$TRANSPORT_BENCH_SUITE" \
             LOLA_BENCH_PROFILE="$profile" \
+            LOLA_BENCH_BACKEND="$LOLA_BENCH_BACKEND" \
             BAZEL="$resolved_bazel" \
-            "${cargo_parts[@]}" bench --features "$features" --bench transport_criterion -- "${criterion_parts[@]}" "$@"
+            "${cargo_parts[@]}" bench "${feature_parts[@]}" --bench transport_criterion -- "${criterion_parts[@]}" "$@"
     fi
 }
 
@@ -199,16 +232,19 @@ command_line() {
     local profile="$2"
     local features
     features="$(cargo_features "$path")"
+    local feature_args
+    feature_args="$(cargo_feature_args "$features")"
     local resolved_bazel
     resolved_bazel="$(resolve_bazel)"
 
-    printf 'TRANSPORT_BENCH_SUITE=%s LOLA_BENCH_PROFILE=%s BAZEL=%s CARGO=%q %s bench --features %s --bench transport_criterion -- %s\n' \
+    printf 'TRANSPORT_BENCH_SUITE=%s LOLA_BENCH_PROFILE=%s LOLA_BENCH_BACKEND=%s BAZEL=%s CARGO=%q %s bench %s --bench transport_criterion -- %s\n' \
         "$TRANSPORT_BENCH_SUITE" \
         "$profile" \
+        "$LOLA_BENCH_BACKEND" \
         "$resolved_bazel" \
         "$CARGO_CMD" \
         "$CARGO_CMD" \
-        "$features" \
+        "$feature_args" \
         "$CRITERION_ARGS"
 }
 
@@ -265,6 +301,7 @@ $(command_line owned camera)
 - OS: \`$(uname -srmo)\`
 - Suite: \`$TRANSPORT_BENCH_SUITE\`
 - Profile request: \`$TRANSPORT_BENCH_PROFILE\`
+- Backend: \`$LOLA_BENCH_BACKEND\`
 - Zero-copy features: \`$zero_copy_features\`
 - Owned features: \`$owned_features\`
 - Criterion args: \`$CRITERION_ARGS\`
@@ -283,7 +320,7 @@ $(command_line owned camera)
 
 ## Notes
 
-This script is the USR-10B3 C2 authority wrapper for the representative LoLa payload-contract command shapes. The owned path uses the benchmark-only copying \`BenchmarkOwnedLolaTransport\` wrapper behind \`benchmark-owned\`; it is not direct true zero-copy. Default features select the bundled LoLa bridge build-from-source path. Artifacts are written only under the caller-selected report directory. Guard-backed aggregate claims remain blocked until a real aggregate guard comparison is implemented.
+This script is the USR-10B3X authority wrapper for the representative LoLa payload-contract command shapes. The owned path uses \`LolaOwnedCore\` through the generic selected-wire owned adapter behind \`benchmark-owned\`. Default backend \`native\` selects the bundled LoLa bridge build-from-source path; backend \`test-stub\` runs with \`--no-default-features --features test-stub,...\` for environments without Bazel/native LoLa. Artifacts are written only under the caller-selected report directory. Guard-backed aggregate claims remain blocked until the later aggregate guard comparison is implemented.
 SUMMARY
 }
 

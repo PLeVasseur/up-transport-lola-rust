@@ -30,13 +30,14 @@ harness = false
 
 [dependencies]
 async-trait = "0.1"
+bytes = "1"
 protobuf = { version = "3.7.2", features = ["with-bytes"] }
 tokio = { version = "1.45.1", default-features = false, features = ["rt", "sync", "time"] }
-up-rust = { git = "ssh://git@github.com/PLeVasseur/up-rust.git", rev = "41c43e1b7912ec55ef6d515fa216e9bbc7466f58" }
+up-rust = { git = "ssh://git@github.com/PLeVasseur/up-rust.git", rev = "75d8c108d2884957a9863579f408b9437c2b5392" }
 
 [dev-dependencies]
 criterion = { version = "0.5.1", features = ["csv_output"] }
-up-wire-xcdrv2 = { git = "ssh://git@github.com/PLeVasseur/up-wire-xcdrv2-rust.git", rev = "c7423cf8b11f78aba6b4ad51ad053e49867df3e8" }
+up-wire-xcdrv2 = { git = "ssh://git@github.com/PLeVasseur/up-wire-xcdrv2-rust.git", rev = "17a4f9f969ba601566fffa89849c2f9c7c01f3a3" }
 
 [package.metadata.docs.rs]
 no-default-features = true

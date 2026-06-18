@@ -32,7 +32,7 @@ mod sys;
 pub use config::{LolaPullMismatchQueueFullPolicy, LolaTransportConfig};
 pub use frame::{LolaRxLease, LolaTxLoan, LolaUninitTxLoan};
 #[cfg(feature = "benchmark-owned")]
-pub use owned_benchmark::BenchmarkOwnedLolaTransport;
+pub use owned_benchmark::LolaOwnedCore;
 pub use transport::{LolaPullMismatchQueueDiagnostics, LolaZeroCopyCore, UTransportLola};
 
 #[cfg(test)]
