@@ -25,6 +25,7 @@ TRANSPORT_BENCH_PROFILE="${TRANSPORT_BENCH_PROFILE:-all}"
 TRANSPORT_BENCH_REPORT_DIR="${TRANSPORT_BENCH_REPORT_DIR:-$DEFAULT_REPORT_DIR}"
 CRITERION_ARGS="${CRITERION_ARGS:-$DEFAULT_CRITERION_ARGS}"
 BENCH_PIN_PREFIX="${BENCH_PIN_PREFIX:-}"
+CARGO_CMD="${CARGO:-cargo}"
 
 usage() {
     cat <<'USAGE'
@@ -41,6 +42,7 @@ Environment:
   CRITERION_ARGS              Criterion args. Default matches representative-v1.
   BENCH_PIN_PREFIX            Optional command prefix for CPU pinning, etc.
   BAZEL                       Bazel/Bazelisk path for bundled LoLa bridge builds.
+  CARGO                       Cargo binary. Default: cargo.
 
 If BAZEL is unset, the script uses the repo-local Bazelisk installed by
 scripts/run-native-validation.sh bootstrap when available.
@@ -155,6 +157,8 @@ run_cargo_bench() {
     features="$(cargo_features "$path")"
     local resolved_bazel
     resolved_bazel="$(resolve_bazel)"
+    local cargo_parts
+    read -r -a cargo_parts <<<"$CARGO_CMD"
 
     read -r -a criterion_parts <<<"$CRITERION_ARGS"
     if [[ -n "$BENCH_PIN_PREFIX" ]]; then
@@ -162,12 +166,12 @@ run_cargo_bench() {
         TRANSPORT_BENCH_SUITE="$TRANSPORT_BENCH_SUITE" \
             LOLA_BENCH_PROFILE="$profile" \
             BAZEL="$resolved_bazel" \
-            "${pin_parts[@]}" cargo bench --features "$features" --bench transport_criterion -- "${criterion_parts[@]}" "$@"
+            "${pin_parts[@]}" "${cargo_parts[@]}" bench --features "$features" --bench transport_criterion -- "${criterion_parts[@]}" "$@"
     else
         TRANSPORT_BENCH_SUITE="$TRANSPORT_BENCH_SUITE" \
             LOLA_BENCH_PROFILE="$profile" \
             BAZEL="$resolved_bazel" \
-            cargo bench --features "$features" --bench transport_criterion -- "${criterion_parts[@]}" "$@"
+            "${cargo_parts[@]}" bench --features "$features" --bench transport_criterion -- "${criterion_parts[@]}" "$@"
     fi
 }
 
@@ -198,10 +202,12 @@ command_line() {
     local resolved_bazel
     resolved_bazel="$(resolve_bazel)"
 
-    printf 'TRANSPORT_BENCH_SUITE=%s LOLA_BENCH_PROFILE=%s BAZEL=%s cargo bench --features %s --bench transport_criterion -- %s\n' \
+    printf 'TRANSPORT_BENCH_SUITE=%s LOLA_BENCH_PROFILE=%s BAZEL=%s CARGO=%q %s bench --features %s --bench transport_criterion -- %s\n' \
         "$TRANSPORT_BENCH_SUITE" \
         "$profile" \
         "$resolved_bazel" \
+        "$CARGO_CMD" \
+        "$CARGO_CMD" \
         "$features" \
         "$CRITERION_ARGS"
 }
@@ -255,7 +261,7 @@ $(command_line owned camera)
 - Git head: \`$(git_value rev-parse HEAD)\`
 - Git branch: \`$(git_value branch --show-current)\`
 - Rust: \`$(rustc --version)\`
-- Cargo: \`$(cargo --version)\`
+- Cargo: \`$($CARGO_CMD --version)\`
 - OS: \`$(uname -srmo)\`
 - Suite: \`$TRANSPORT_BENCH_SUITE\`
 - Profile request: \`$TRANSPORT_BENCH_PROFILE\`
@@ -277,7 +283,7 @@ $(command_line owned camera)
 
 ## Notes
 
-This script is the Phase 08C2 authority wrapper for the 08C1 representative-v1 command shapes. The owned path uses the benchmark-only copying \`BenchmarkOwnedLolaTransport\` wrapper behind \`benchmark-owned\`; it is not direct true zero-copy. Default features select the bundled LoLa bridge build-from-source path. Artifacts are written only under the caller-selected report directory.
+This script is the USR-10B3 C2 authority wrapper for the representative LoLa payload-contract command shapes. The owned path uses the benchmark-only copying \`BenchmarkOwnedLolaTransport\` wrapper behind \`benchmark-owned\`; it is not direct true zero-copy. Default features select the bundled LoLa bridge build-from-source path. Artifacts are written only under the caller-selected report directory. Guard-backed aggregate claims remain blocked until a real aggregate guard comparison is implemented.
 SUMMARY
 }
 
@@ -303,7 +309,7 @@ export_results() {
 
     if [[ ! -f "$report_dir/guardrail.json" ]]; then
         cat >"$report_dir/guardrail.json" <<JSON
-{"status":"unavailable","reason":"criterion-guardrail utility is not available in this standalone repository"}
+{"status":"blocked","reason":"USR-10 aggregate guard comparison is not implemented for LoLa; use raw C1/C2 evidence only and do not make aggregate guard-backed claims"}
 JSON
     fi
 
@@ -341,7 +347,7 @@ case "$subcommand" in
         fi
         mkdir -p "$(dirname "$2")"
         cat >"$2" <<JSON
-{"status":"unavailable","candidate":"$1","reason":"criterion-guardrail utility is not available in this standalone repository"}
+{"status":"blocked","candidate":"$1","reason":"USR-10 aggregate guard comparison is not implemented for LoLa; use raw C1/C2 evidence only and do not make aggregate guard-backed claims"}
 JSON
         ;;
     export)

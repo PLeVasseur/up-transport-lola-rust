@@ -19,14 +19,15 @@ use tokio::runtime::{Builder, Runtime};
 #[cfg(feature = "payload-contract-benchmarks")]
 use up_rust::bench_fixtures::payload_contract::{self, *};
 use up_rust::{
-    PayloadEncoding, UCode, UFrameMetadata, ULoanedContiguousZeroCopyRxFrame, UMessageBuilder,
-    UMessageType, UUri, UZeroCopyTransport, UZeroCopyUninitTransportExt, UUID,
+    PayloadEncoding, StableContainerWireFormat, UCode, UFrameMetadata,
+    ULoanedContiguousZeroCopyRxFrame, UMessageBuilder, UMessageType, UUri, UWireTransport,
+    UWithWire, UZeroCopyTransport, UZeroCopyUninitTransportExt, UUID,
 };
 #[cfg(all(feature = "payload-contract-benchmarks", feature = "benchmark-owned"))]
 use up_rust::{ProtobufPayload, UOwnedFrame, UOwnedTransport};
 #[cfg(feature = "benchmark-owned")]
 use up_transport_lola_rust::BenchmarkOwnedLolaTransport;
-use up_transport_lola_rust::{LolaTransportConfig, UTransportLola};
+use up_transport_lola_rust::{LolaTransportConfig, LolaZeroCopyCore, UTransportLola};
 
 const BENCH_TIMEOUT: Duration = Duration::from_secs(5);
 const LARGE_SENSOR_BENCH_TIMEOUT: Duration = Duration::from_secs(30);
@@ -149,17 +150,20 @@ struct PayloadContractAck {
 }
 
 struct BenchTransports {
-    zero_copy: Arc<UTransportLola>,
+    zero_copy: UWireTransport<LolaZeroCopyCore, StableContainerWireFormat>,
     #[cfg(feature = "benchmark-owned")]
     owned: Arc<BenchmarkOwnedLolaTransport>,
 }
 
 impl BenchTransports {
     fn build(config: LolaTransportConfig) -> Self {
-        let zero_copy =
+        let physical =
             UTransportLola::build(config).expect("LoLa benchmark transport should build");
+        let zero_copy = physical
+            .zero_copy_core()
+            .with_wire(StableContainerWireFormat);
         #[cfg(feature = "benchmark-owned")]
-        let owned = Arc::new(BenchmarkOwnedLolaTransport::new(zero_copy.clone()));
+        let owned = Arc::new(BenchmarkOwnedLolaTransport::new(physical));
         Self {
             zero_copy,
             #[cfg(feature = "benchmark-owned")]
