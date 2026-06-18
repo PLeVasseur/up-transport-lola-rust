@@ -24,7 +24,7 @@ use up_rust::{
     UWithWire, UZeroCopyTransport, UZeroCopyUninitTransportExt, UUID,
 };
 #[cfg(all(feature = "payload-contract-benchmarks", feature = "benchmark-owned"))]
-use up_rust::{ProtobufPayload, UOwnedFrame, UOwnedTransport};
+use up_rust::{ProtobufPayload, ProtobufWire, UOwnedFrame, UOwnedTransport};
 #[cfg(feature = "benchmark-owned")]
 use up_transport_lola_rust::BenchmarkOwnedLolaTransport;
 use up_transport_lola_rust::{LolaTransportConfig, LolaZeroCopyCore, UTransportLola};
@@ -152,22 +152,30 @@ struct PayloadContractAck {
 struct BenchTransports {
     zero_copy: UWireTransport<LolaZeroCopyCore, StableContainerWireFormat>,
     #[cfg(feature = "benchmark-owned")]
-    owned: Arc<BenchmarkOwnedLolaTransport>,
+    protobuf_owned: Arc<BenchmarkOwnedLolaTransport<ProtobufWire>>,
+    #[cfg(feature = "benchmark-owned")]
+    stable_owned: Arc<BenchmarkOwnedLolaTransport<StableContainerWireFormat>>,
 }
 
 impl BenchTransports {
     fn build(config: LolaTransportConfig) -> Self {
         let physical =
             UTransportLola::build(config).expect("LoLa benchmark transport should build");
-        let zero_copy = physical
-            .zero_copy_core()
-            .with_wire(StableContainerWireFormat);
+        let core = physical.zero_copy_core();
+        let zero_copy = core.clone().with_wire(StableContainerWireFormat);
         #[cfg(feature = "benchmark-owned")]
-        let owned = Arc::new(BenchmarkOwnedLolaTransport::new(physical));
+        let protobuf_owned = Arc::new(BenchmarkOwnedLolaTransport::new(core.clone(), ProtobufWire));
+        #[cfg(feature = "benchmark-owned")]
+        let stable_owned = Arc::new(BenchmarkOwnedLolaTransport::new(
+            core,
+            StableContainerWireFormat,
+        ));
         Self {
             zero_copy,
             #[cfg(feature = "benchmark-owned")]
-            owned,
+            protobuf_owned,
+            #[cfg(feature = "benchmark-owned")]
+            stable_owned,
         }
     }
 }
@@ -278,7 +286,7 @@ async fn send_payload_contract_path(
             let frame = UOwnedFrame::with_payload(metadata, payload)
                 .expect("valid protobuf owned benchmark frame");
             transports
-                .owned
+                .protobuf_owned
                 .send_owned(frame)
                 .await
                 .expect("LoLa payload-contract protobuf send should succeed");
@@ -296,7 +304,7 @@ async fn send_payload_contract_path(
             let frame = UOwnedFrame::with_payload(metadata, fixture.bytes)
                 .expect("valid stable owned benchmark frame");
             transports
-                .owned
+                .stable_owned
                 .send_owned(frame)
                 .await
                 .expect("LoLa payload-contract stable owned bytes send should succeed");
@@ -414,7 +422,7 @@ async fn receive_payload_contract_ack(
             #[cfg(feature = "benchmark-owned")]
             PayloadContractPath::ProtobufOwned => tokio::time::timeout(
                 remaining,
-                transports.owned.receive_owned(&case.source, None),
+                transports.protobuf_owned.receive_owned(&case.source, None),
             )
             .await
             .expect("timed out waiting for LoLa payload-contract owned receive")
@@ -429,7 +437,7 @@ async fn receive_payload_contract_ack(
             #[cfg(feature = "benchmark-owned")]
             PayloadContractPath::StableOwnedBytes => tokio::time::timeout(
                 remaining,
-                transports.owned.receive_owned(&case.source, None),
+                transports.stable_owned.receive_owned(&case.source, None),
             )
             .await
             .expect("timed out waiting for LoLa payload-contract stable owned receive")

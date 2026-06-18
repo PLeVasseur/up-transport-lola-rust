@@ -16,36 +16,46 @@ use async_trait::async_trait;
 use tokio::sync::Mutex;
 use up_rust::{
     UCode, UFrameView, UOwnedFrame, UOwnedListener, UOwnedTransportImpl, UStatus, UTxBuffer,
-    UTxLoanSpec, UUri, UZeroCopyListener, UZeroCopyTransport, ValidatedOwnedFrame,
+    UTxLoanSpec, UUri, UWireMetadata, UWireTransport, UWithWire, UZeroCopyListener,
+    UZeroCopyTransport, ValidatedOwnedFrame,
 };
 
-use crate::{LolaRxLease, UTransportLola};
+use crate::{LolaRxLease, LolaZeroCopyCore};
 
 /// Benchmark-only owned wrapper around [`UTransportLola`].
-pub struct BenchmarkOwnedLolaTransport {
-    inner: Arc<UTransportLola>,
-    listeners: Mutex<Vec<OwnedListenerRegistration>>,
+pub struct BenchmarkOwnedLolaTransport<W>
+where
+    W: UWireMetadata,
+{
+    inner: UWireTransport<LolaZeroCopyCore, W>,
+    listeners: Mutex<Vec<OwnedListenerRegistration<W>>>,
 }
 
-impl BenchmarkOwnedLolaTransport {
+impl<W> BenchmarkOwnedLolaTransport<W>
+where
+    W: UWireMetadata,
+{
     /// Creates a benchmark-only owned wrapper.
     #[must_use]
-    pub fn new(inner: Arc<UTransportLola>) -> Self {
+    pub fn new(core: LolaZeroCopyCore, wire: W) -> Self {
         Self {
-            inner,
+            inner: core.with_wire(wire),
             listeners: Mutex::new(Vec::new()),
         }
     }
 
-    /// Returns the wrapped zero-copy transport.
+    /// Returns the wrapped selected-wire zero-copy transport.
     #[must_use]
-    pub fn inner(&self) -> &Arc<UTransportLola> {
+    pub fn inner(&self) -> &UWireTransport<LolaZeroCopyCore, W> {
         &self.inner
     }
 }
 
 #[async_trait]
-impl UOwnedTransportImpl for BenchmarkOwnedLolaTransport {
+impl<W> UOwnedTransportImpl for BenchmarkOwnedLolaTransport<W>
+where
+    W: UWireMetadata + Send + Sync + 'static,
+{
     async fn send_validated_owned(&self, frame: ValidatedOwnedFrame) -> Result<(), UStatus> {
         let frame = frame.into_inner();
         let mut loan = self
@@ -80,8 +90,9 @@ impl UOwnedTransportImpl for BenchmarkOwnedLolaTransport {
         sink_filter: Option<&UUri>,
         listener: Arc<dyn UOwnedListener>,
     ) -> Result<(), UStatus> {
-        let zero_copy_listener = Arc::new(OwnedBenchmarkListener {
+        let zero_copy_listener = Arc::new(OwnedBenchmarkListener::<W> {
             listener: listener.clone(),
+            _wire: std::marker::PhantomData,
         });
         self.inner
             .register_zero_copy_listener(source_filter, sink_filter, zero_copy_listener.clone())
@@ -125,20 +136,30 @@ impl UOwnedTransportImpl for BenchmarkOwnedLolaTransport {
     }
 }
 
-struct OwnedListenerRegistration {
+struct OwnedListenerRegistration<W>
+where
+    W: UWireMetadata,
+{
     source_filter: UUri,
     sink_filter: Option<UUri>,
     owned_listener: Arc<dyn UOwnedListener>,
-    zero_copy_listener: Arc<OwnedBenchmarkListener>,
+    zero_copy_listener: Arc<OwnedBenchmarkListener<W>>,
 }
 
-struct OwnedBenchmarkListener {
+struct OwnedBenchmarkListener<W>
+where
+    W: UWireMetadata,
+{
     listener: Arc<dyn UOwnedListener>,
+    _wire: std::marker::PhantomData<W>,
 }
 
 #[async_trait]
-impl UZeroCopyListener<LolaRxLease> for OwnedBenchmarkListener {
-    async fn on_receive_zero_copy(&self, frame: LolaRxLease) {
+impl<W> UZeroCopyListener<up_rust::UWireRx<LolaRxLease, W>> for OwnedBenchmarkListener<W>
+where
+    W: UWireMetadata + Send + Sync + 'static,
+{
+    async fn on_receive_zero_copy(&self, frame: up_rust::UWireRx<LolaRxLease, W>) {
         let frame = lease_to_owned_frame(&frame)
             .expect("benchmark-only LoLa owned listener should receive valid frames");
         self.listener.on_receive_owned(frame).await;
@@ -159,7 +180,10 @@ fn tx_loan_spec(
     UTxLoanSpec::payload(metadata, payload_len, 1)
 }
 
-fn lease_to_owned_frame(frame: &LolaRxLease) -> Result<UOwnedFrame, UStatus> {
+fn lease_to_owned_frame<F>(frame: &F) -> Result<UOwnedFrame, UStatus>
+where
+    F: UFrameView,
+{
     if !frame.has_payload() {
         return UOwnedFrame::without_payload(frame.metadata().clone()).map_err(|error| {
             UStatus::fail_with_code(
