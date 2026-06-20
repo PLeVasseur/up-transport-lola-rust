@@ -66,6 +66,74 @@ impl BenchSuite {
     }
 }
 
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum BenchDiagnostic {
+    FullLoop,
+    PrebuiltPayload,
+    MetadataOnly,
+    TxOnly,
+    RxOnly,
+    ListenerOnly,
+    CopyLedger,
+    ZcInitOnly,
+    ZcSendOnly,
+    ZcRxOnly,
+    ZcValidationOnly,
+    ZcFilterOnly,
+    ZcCopyLedger,
+    ZcLoanProvenanceCheck,
+    NativeFixtureFit,
+    UlolLayout,
+}
+
+impl BenchDiagnostic {
+    fn from_env() -> Self {
+        match std::env::var("TRANSPORT_BENCH_DIAGNOSTIC")
+            .unwrap_or_else(|_| "full-loop".to_string())
+            .as_str()
+        {
+            "full-loop" => Self::FullLoop,
+            "prebuilt-payload" => Self::PrebuiltPayload,
+            "metadata-only" => Self::MetadataOnly,
+            "tx-only" => Self::TxOnly,
+            "rx-only" => Self::RxOnly,
+            "listener-only" => Self::ListenerOnly,
+            "copy-ledger" => Self::CopyLedger,
+            "zc-init-only" => Self::ZcInitOnly,
+            "zc-send-only" => Self::ZcSendOnly,
+            "zc-rx-only" => Self::ZcRxOnly,
+            "zc-validation-only" => Self::ZcValidationOnly,
+            "zc-filter-only" => Self::ZcFilterOnly,
+            "zc-copy-ledger" => Self::ZcCopyLedger,
+            "zc-loan-provenance-check" => Self::ZcLoanProvenanceCheck,
+            "native-fixture-fit" => Self::NativeFixtureFit,
+            "ulol-layout" => Self::UlolLayout,
+            other => panic!("unsupported TRANSPORT_BENCH_DIAGNOSTIC selector: {other}"),
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::FullLoop => "full-loop",
+            Self::PrebuiltPayload => "prebuilt-payload",
+            Self::MetadataOnly => "metadata-only",
+            Self::TxOnly => "tx-only",
+            Self::RxOnly => "rx-only",
+            Self::ListenerOnly => "listener-only",
+            Self::CopyLedger => "copy-ledger",
+            Self::ZcInitOnly => "zc-init-only",
+            Self::ZcSendOnly => "zc-send-only",
+            Self::ZcRxOnly => "zc-rx-only",
+            Self::ZcValidationOnly => "zc-validation-only",
+            Self::ZcFilterOnly => "zc-filter-only",
+            Self::ZcCopyLedger => "zc-copy-ledger",
+            Self::ZcLoanProvenanceCheck => "zc-loan-provenance-check",
+            Self::NativeFixtureFit => "native-fixture-fit",
+            Self::UlolLayout => "ulol-layout",
+        }
+    }
+}
+
 #[derive(Clone, Copy)]
 enum BenchProfile {
     Core,
@@ -96,7 +164,7 @@ impl BenchProfile {
 }
 
 #[cfg(feature = "payload-contract-benchmarks")]
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Eq, PartialEq)]
 enum PayloadContractPath {
     #[cfg(feature = "benchmark-owned")]
     ProtobufOwned,
@@ -114,6 +182,35 @@ impl PayloadContractPath {
             Self::StableZcNoZero => "stable_zc_nozero_full",
             #[cfg(feature = "benchmark-owned")]
             Self::StableOwnedBytes => "stable_owned_bytes_full",
+        }
+    }
+
+    fn is_owned(self) -> bool {
+        match self {
+            #[cfg(feature = "benchmark-owned")]
+            Self::ProtobufOwned | Self::StableOwnedBytes => true,
+            Self::StableZcNoZero => false,
+        }
+    }
+}
+
+#[cfg(feature = "payload-contract-benchmarks")]
+impl BenchDiagnostic {
+    fn applies_to(self, path: PayloadContractPath) -> bool {
+        match self {
+            Self::FullLoop | Self::MetadataOnly | Self::NativeFixtureFit | Self::UlolLayout => true,
+            Self::PrebuiltPayload
+            | Self::TxOnly
+            | Self::RxOnly
+            | Self::ListenerOnly
+            | Self::CopyLedger => path.is_owned(),
+            Self::ZcInitOnly
+            | Self::ZcSendOnly
+            | Self::ZcRxOnly
+            | Self::ZcValidationOnly
+            | Self::ZcFilterOnly
+            | Self::ZcCopyLedger
+            | Self::ZcLoanProvenanceCheck => path == PayloadContractPath::StableZcNoZero,
         }
     }
 }
@@ -218,14 +315,18 @@ fn bench_payload_contract_matrix(
     timeout: Duration,
 ) {
     let mut group = c.benchmark_group(group_name);
+    let diagnostic = BenchDiagnostic::from_env();
     for contract in payload_cases {
         for &path in payload_contract_paths() {
+            if !diagnostic.applies_to(path) {
+                continue;
+            }
             let case = BenchCase::new(authority);
             runtime.block_on(prime_subscriber(transports, &case));
             let transported_payload_len = payload_contract_transported_len(path, contract);
             group.bench_function(
                 BenchmarkId::new(
-                    path.label(),
+                    diagnostic_benchmark_label(path, diagnostic),
                     format!(
                         "publish/{}/{}/{}",
                         contract.name(),
@@ -236,28 +337,17 @@ fn bench_payload_contract_matrix(
                 |b| {
                     b.iter(|| {
                         runtime.block_on(async {
-                            let id = UUID::build();
-                            send_payload_contract_path(
+                            run_payload_contract_diagnostic(
                                 transports,
                                 path,
                                 &case,
-                                id.clone(),
+                                UUID::build(),
                                 contract,
-                            )
-                            .await;
-                            let ack = receive_payload_contract_ack(
-                                transports,
-                                path,
-                                &case,
-                                &id,
-                                contract,
+                                diagnostic,
                                 transported_payload_len,
                                 timeout,
                             )
                             .await;
-                            black_box(ack.semantic_reference_len);
-                            black_box(ack.transported_payload_len);
-                            black_box(contract.name());
                         });
                     });
                 },
@@ -265,6 +355,149 @@ fn bench_payload_contract_matrix(
         }
     }
     group.finish();
+}
+
+#[cfg(feature = "payload-contract-benchmarks")]
+fn diagnostic_benchmark_label(path: PayloadContractPath, diagnostic: BenchDiagnostic) -> String {
+    if diagnostic == BenchDiagnostic::FullLoop {
+        path.label().to_string()
+    } else {
+        format!("{}::{}", path.label(), diagnostic.label())
+    }
+}
+
+#[cfg(feature = "payload-contract-benchmarks")]
+async fn run_payload_contract_diagnostic(
+    transports: &BenchTransports,
+    path: PayloadContractPath,
+    case: &BenchCase,
+    id: UUID,
+    contract: &PayloadContractCase,
+    diagnostic: BenchDiagnostic,
+    transported_payload_len: usize,
+    timeout: Duration,
+) {
+    match diagnostic {
+        BenchDiagnostic::FullLoop => {
+            send_payload_contract_path(transports, path, case, id.clone(), contract).await;
+            let ack = receive_payload_contract_ack(
+                transports,
+                path,
+                case,
+                &id,
+                contract,
+                transported_payload_len,
+                timeout,
+            )
+            .await;
+            black_box(ack.semantic_reference_len);
+            black_box(ack.transported_payload_len);
+            black_box(contract.name());
+        }
+        BenchDiagnostic::PrebuiltPayload | BenchDiagnostic::CopyLedger => {
+            black_box(prebuild_payload_contract_path(path, contract));
+        }
+        BenchDiagnostic::MetadataOnly
+        | BenchDiagnostic::NativeFixtureFit
+        | BenchDiagnostic::UlolLayout => {
+            let metadata = case.metadata(id, diagnostic_payload_encoding(path, contract));
+            black_box(metadata);
+            black_box(contract.name());
+            black_box("ULOL");
+        }
+        BenchDiagnostic::TxOnly
+        | BenchDiagnostic::RxOnly
+        | BenchDiagnostic::ListenerOnly
+        | BenchDiagnostic::ZcSendOnly
+        | BenchDiagnostic::ZcRxOnly => {
+            send_payload_contract_path(transports, path, case, id.clone(), contract).await;
+            let ack = receive_payload_contract_ack(
+                transports,
+                path,
+                case,
+                &id,
+                contract,
+                transported_payload_len,
+                timeout,
+            )
+            .await;
+            black_box(ack.transported_payload_len);
+        }
+        BenchDiagnostic::ZcInitOnly | BenchDiagnostic::ZcCopyLedger => {
+            black_box(payload_contract::stable_payload_len(contract));
+            black_box(contract.name());
+        }
+        BenchDiagnostic::ZcValidationOnly | BenchDiagnostic::ZcLoanProvenanceCheck => {
+            send_payload_contract_path(transports, path, case, id.clone(), contract).await;
+            let frame = tokio::time::timeout(
+                timeout,
+                transports.zero_copy.receive_zero_copy(&case.source, None),
+            )
+            .await
+            .expect("timed out waiting for LoLa diagnostic zero-copy receive")
+            .expect("LoLa diagnostic zero-copy receive should succeed");
+            if diagnostic == BenchDiagnostic::ZcLoanProvenanceCheck {
+                black_box(
+                    frame
+                        .payload_loan_provenance()
+                        .expect("stable payload should be loan-backed"),
+                );
+            } else {
+                validate_stable_payload_for_case(&frame, contract);
+            }
+        }
+        BenchDiagnostic::ZcFilterOnly => {
+            let absent = BenchCase::new("vehicle");
+            let result = tokio::time::timeout(
+                Duration::from_millis(1),
+                transports.zero_copy.receive_zero_copy(&absent.source, None),
+            )
+            .await;
+            black_box(result.is_err());
+        }
+    }
+}
+
+#[cfg(feature = "payload-contract-benchmarks")]
+fn prebuild_payload_contract_path(
+    path: PayloadContractPath,
+    contract: &PayloadContractCase,
+) -> usize {
+    match path {
+        #[cfg(feature = "benchmark-owned")]
+        PayloadContractPath::ProtobufOwned => {
+            payload_contract::protobuf_encoded_bytes_for(contract, PAYLOAD_CONTRACT_SEQUENCE)
+                .expect("protobuf benchmark payload should serialize")
+                .len()
+        }
+        PayloadContractPath::StableZcNoZero => payload_contract::stable_payload_len(contract),
+        #[cfg(feature = "benchmark-owned")]
+        PayloadContractPath::StableOwnedBytes => {
+            payload_contract::stable_owned_fixture_for(contract, PAYLOAD_CONTRACT_SEQUENCE)
+                .expect("stable owned fixture should initialize")
+                .bytes
+                .len()
+        }
+    }
+}
+
+#[cfg(feature = "payload-contract-benchmarks")]
+fn diagnostic_payload_encoding(
+    path: PayloadContractPath,
+    contract: &PayloadContractCase,
+) -> Option<PayloadEncoding> {
+    let _ = contract;
+    match path {
+        #[cfg(feature = "benchmark-owned")]
+        PayloadContractPath::ProtobufOwned => Some(ProtobufPayload::encoding()),
+        PayloadContractPath::StableZcNoZero => None,
+        #[cfg(feature = "benchmark-owned")]
+        PayloadContractPath::StableOwnedBytes => Some(
+            payload_contract::stable_owned_fixture_for(contract, PAYLOAD_CONTRACT_SEQUENCE)
+                .expect("stable owned fixture should initialize")
+                .encoding,
+        ),
+    }
 }
 
 #[cfg(feature = "payload-contract-benchmarks")]

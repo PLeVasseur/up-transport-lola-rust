@@ -27,6 +27,7 @@ CRITERION_ARGS="${CRITERION_ARGS:-$DEFAULT_CRITERION_ARGS}"
 BENCH_PIN_PREFIX="${BENCH_PIN_PREFIX:-}"
 CARGO_CMD="${CARGO:-cargo}"
 LOLA_BENCH_BACKEND="${LOLA_BENCH_BACKEND:-native}"
+TRANSPORT_BENCH_DIAGNOSTIC="${TRANSPORT_BENCH_DIAGNOSTIC:-full-loop}"
 
 usage() {
     cat <<'USAGE'
@@ -45,6 +46,7 @@ Environment:
   BAZEL                       Bazel/Bazelisk path for bundled LoLa bridge builds.
   CARGO                       Cargo binary. Default: cargo.
   LOLA_BENCH_BACKEND          native or test-stub. Default: native.
+  TRANSPORT_BENCH_DIAGNOSTIC  full-loop or a support-only diagnostic selector.
 
 If BAZEL is unset, the script uses the repo-local Bazelisk installed by
 scripts/run-native-validation.sh bootstrap when available.
@@ -195,12 +197,14 @@ run_cargo_bench() {
     if [[ -n "$BENCH_PIN_PREFIX" ]]; then
         read -r -a pin_parts <<<"$BENCH_PIN_PREFIX"
         TRANSPORT_BENCH_SUITE="$TRANSPORT_BENCH_SUITE" \
+            TRANSPORT_BENCH_DIAGNOSTIC="$TRANSPORT_BENCH_DIAGNOSTIC" \
             LOLA_BENCH_PROFILE="$profile" \
             LOLA_BENCH_BACKEND="$LOLA_BENCH_BACKEND" \
             BAZEL="$resolved_bazel" \
             "${pin_parts[@]}" "${cargo_parts[@]}" bench "${feature_parts[@]}" --bench transport_criterion -- "${criterion_parts[@]}" "$@"
     else
         TRANSPORT_BENCH_SUITE="$TRANSPORT_BENCH_SUITE" \
+            TRANSPORT_BENCH_DIAGNOSTIC="$TRANSPORT_BENCH_DIAGNOSTIC" \
             LOLA_BENCH_PROFILE="$profile" \
             LOLA_BENCH_BACKEND="$LOLA_BENCH_BACKEND" \
             BAZEL="$resolved_bazel" \
@@ -237,8 +241,9 @@ command_line() {
     local resolved_bazel
     resolved_bazel="$(resolve_bazel)"
 
-    printf 'TRANSPORT_BENCH_SUITE=%s LOLA_BENCH_PROFILE=%s LOLA_BENCH_BACKEND=%s BAZEL=%s CARGO=%q %s bench %s --bench transport_criterion -- %s\n' \
+    printf 'TRANSPORT_BENCH_SUITE=%s TRANSPORT_BENCH_DIAGNOSTIC=%s LOLA_BENCH_PROFILE=%s LOLA_BENCH_BACKEND=%s BAZEL=%s CARGO=%q %s bench %s --bench transport_criterion -- %s\n' \
         "$TRANSPORT_BENCH_SUITE" \
+        "$TRANSPORT_BENCH_DIAGNOSTIC" \
         "$profile" \
         "$LOLA_BENCH_BACKEND" \
         "$resolved_bazel" \
@@ -302,6 +307,7 @@ $(command_line owned camera)
 - Suite: \`$TRANSPORT_BENCH_SUITE\`
 - Profile request: \`$TRANSPORT_BENCH_PROFILE\`
 - Backend: \`$LOLA_BENCH_BACKEND\`
+- Diagnostic selector: \`$TRANSPORT_BENCH_DIAGNOSTIC\`
 - Zero-copy features: \`$zero_copy_features\`
 - Owned features: \`$owned_features\`
 - Criterion args: \`$CRITERION_ARGS\`
@@ -320,7 +326,7 @@ $(command_line owned camera)
 
 ## Notes
 
-This script is the USR-10B3X authority wrapper for the representative LoLa payload-contract command shapes. The owned path uses \`LolaOwnedCore\` through the generic selected-wire owned adapter behind \`benchmark-owned\`. Default backend \`native\` selects the bundled LoLa bridge build-from-source path; backend \`test-stub\` runs with \`--no-default-features --features test-stub,...\` for environments without Bazel/native LoLa. Artifacts are written only under the caller-selected report directory. Guard-backed aggregate claims remain blocked until the later aggregate guard comparison is implemented.
+This script is the USR-10B3X authority wrapper for the representative LoLa payload-contract command shapes. The owned path uses \`LolaOwnedCore\` through the generic selected-wire owned adapter behind \`benchmark-owned\`. Default backend \`native\` selects the bundled LoLa bridge build-from-source path; backend \`test-stub\` runs with \`--no-default-features --features test-stub,...\` for environments without Bazel/native LoLa. Non-\`full-loop\` diagnostic selectors are support-only and cannot replace native full-loop authority rows. Artifacts are written only under the caller-selected report directory. Guard-backed aggregate claims remain blocked until the later aggregate guard comparison is implemented.
 SUMMARY
 }
 
