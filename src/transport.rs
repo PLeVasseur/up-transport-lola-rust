@@ -578,7 +578,28 @@ impl UZeroCopyTransportCore for UTransportLola {
         source_filter: &UUri,
         sink_filter: Option<&UUri>,
     ) -> Result<Self::Rx, UStatus> {
-        UZeroCopyTransportImpl::receive_validated_zero_copy(self, source_filter, sink_filter).await
+        // LoLa stores selected-wire metadata bytes in the physical ULOL frame.
+        // Public source/sink filtering happens after UWireRx decodes them.
+        let _ = (source_filter, sink_filter);
+
+        #[cfg(feature = "lola-ffi")]
+        {
+            self.receive_next_zero_copy()
+        }
+
+        #[cfg(all(feature = "test-stub", not(feature = "lola-ffi")))]
+        {
+            self.pending_samples
+                .lock()
+                .expect("LoLa test-stub pending sample lock poisoned")
+                .pop_front()
+                .ok_or_else(|| UStatus::fail_with_code(UCode::NotFound, "no LoLa sample available"))
+        }
+
+        #[cfg(not(any(feature = "test-stub", feature = "lola-ffi")))]
+        {
+            Err(backend_unavailable())
+        }
     }
 
     async fn register_encoded_zero_copy_listener(
