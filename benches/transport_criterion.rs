@@ -316,7 +316,9 @@ fn bench_payload_contract_matrix(
 ) {
     let mut group = c.benchmark_group(group_name);
     let diagnostic = BenchDiagnostic::from_env();
-    let case_filter = std::env::var("TRANSPORT_BENCH_CASE").ok();
+    let case_filter = std::env::var("TRANSPORT_BENCH_CASE")
+        .ok()
+        .filter(|filter| !filter.is_empty());
     for contract in payload_cases {
         if let Some(filter) = case_filter.as_deref() {
             if contract.name() != filter {
