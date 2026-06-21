@@ -92,7 +92,7 @@ impl UTransportLola {
         &self.config
     }
 
-    /// Returns a cloneable core for `.with_wire(W)` selected-wire operations.
+    /// Returns a cloneable core for explicit selected-wire adapter construction.
     #[must_use]
     pub fn zero_copy_core(self: &Arc<Self>) -> LolaZeroCopyCore {
         LolaZeroCopyCore {
@@ -782,7 +782,7 @@ impl UZeroCopyUninitTransportCore for LolaZeroCopyCore {
 fn selected_wire_required() -> UStatus {
     UStatus::fail_with_code(
         UCode::FailedPrecondition,
-        "use UTransportLola.with_wire(W) for selected-wire LoLa transport operations",
+        "wrap UTransportLola.zero_copy_core() in a selected-wire adapter for LoLa transport operations",
     )
 }
 

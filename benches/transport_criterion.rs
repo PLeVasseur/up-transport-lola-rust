@@ -18,13 +18,15 @@ use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criteri
 use tokio::runtime::{Builder, Runtime};
 #[cfg(feature = "payload-contract-benchmarks")]
 use up_rust::bench_fixtures::payload_contract::{self, *};
+#[cfg(feature = "benchmark-owned")]
+use up_rust::ProtobufWire;
 use up_rust::{
-    PayloadEncoding, StableContainerWireFormat, UCode, UFrameMetadata,
-    ULoanedContiguousZeroCopyRxFrame, UMessageBuilder, UMessageType, UUri, UWireTransport,
-    UWithWire, UZeroCopyTransport, UZeroCopyUninitTransportExt, UUID,
+    NativePrefixProtobufMetadataCodec, PayloadEncoding, StableContainerWireFormat, UCode,
+    UFrameMetadata, ULoanedContiguousZeroCopyRxFrame, UMessageBuilder, UMessageType, UUri,
+    UWireTransport, UZeroCopyTransport, UZeroCopyUninitTransportExt, UUID,
 };
 #[cfg(all(feature = "payload-contract-benchmarks", feature = "benchmark-owned"))]
-use up_rust::{ProtobufPayload, ProtobufWire, UOwnedFrame, UOwnedTransport};
+use up_rust::{ProtobufPayload, UOwnedFrame, UOwnedTransport};
 #[cfg(feature = "benchmark-owned")]
 use up_transport_lola_rust::LolaOwnedCore;
 use up_transport_lola_rust::{LolaTransportConfig, LolaZeroCopyCore, UTransportLola};
@@ -247,11 +249,18 @@ struct PayloadContractAck {
 }
 
 struct BenchTransports {
-    zero_copy: UWireTransport<LolaZeroCopyCore, StableContainerWireFormat>,
+    zero_copy: UWireTransport<
+        LolaZeroCopyCore,
+        StableContainerWireFormat,
+        NativePrefixProtobufMetadataCodec,
+    >,
     #[cfg(feature = "benchmark-owned")]
-    protobuf_owned: Arc<UWireTransport<LolaOwnedCore, ProtobufWire>>,
+    protobuf_owned:
+        Arc<UWireTransport<LolaOwnedCore, ProtobufWire, NativePrefixProtobufMetadataCodec>>,
     #[cfg(feature = "benchmark-owned")]
-    stable_owned: Arc<UWireTransport<LolaOwnedCore, StableContainerWireFormat>>,
+    stable_owned: Arc<
+        UWireTransport<LolaOwnedCore, StableContainerWireFormat, NativePrefixProtobufMetadataCodec>,
+    >,
 }
 
 impl BenchTransports {
@@ -259,7 +268,11 @@ impl BenchTransports {
         let physical =
             UTransportLola::build(config).expect("LoLa benchmark transport should build");
         let core = physical.zero_copy_core();
-        let zero_copy = core.clone().with_wire(StableContainerWireFormat);
+        let zero_copy = UWireTransport::new(
+            core.clone(),
+            StableContainerWireFormat,
+            NativePrefixProtobufMetadataCodec,
+        );
         #[cfg(feature = "benchmark-owned")]
         let protobuf_owned =
             Arc::new(LolaOwnedCore::new(core.clone()).with_selected_wire(ProtobufWire));

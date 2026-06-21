@@ -5,12 +5,14 @@ use std::{future::Future, sync::Arc, task::Wake};
 use async_trait::async_trait;
 use std::sync::Mutex;
 use up_rust::{
-    try_project_umessage_to_frame_metadata, PayloadEncoding, PayloadFormat, ProtobufWire, UCode,
-    UFrameMetadata, UFrameView, UMessageBuilder, UOwnedFrame, UOwnedTransport, UPayloadFormat,
-    UProtocolNativeWire, UTxBuffer, UTxLoanSpec, UUninitTxBuffer, UUri, UWire, UWireMetadata,
-    UWireRx, UWithWire, UZeroCopyListener, UZeroCopyTransport, UZeroCopyUninitTransport,
+    try_project_umessage_to_frame_metadata, NativePrefixProtobufMetadataCodec, PayloadEncoding,
+    PayloadFormat, ProtobufWire, UCode, UFrameMetadata, UFrameView, UMessageBuilder,
+    UPayloadFormat, UProtocolNativeWire, UTxBuffer, UTxLoanSpec, UUninitTxBuffer, UUri, UWire,
+    UWireRx, UWireTransport, UZeroCopyListener, UZeroCopyTransport, UZeroCopyUninitTransport,
     WireIdentity, NATIVE_PREFIX_METADATA_LAYOUT_ID,
 };
+#[cfg(feature = "benchmark-owned")]
+use up_rust::{UOwnedFrame, UOwnedTransport};
 #[cfg(feature = "benchmark-owned")]
 use up_transport_lola_rust::LolaOwnedCore;
 use up_transport_lola_rust::{LolaRxLease, LolaTransportConfig, UTransportLola};
@@ -77,7 +79,7 @@ fn native_tx_spec(topic: UUri, payload_len: usize, payload_alignment: usize) -> 
 
 fn send_native_payload(transport: &Arc<UTransportLola>, topic: UUri, payload: &[u8]) {
     block_on_ready(async {
-        let selected = transport.zero_copy_core().with_wire(UProtocolNativeWire);
+        let selected = selected_wire(transport.zero_copy_core(), UProtocolNativeWire);
         let mut loan = selected
             .loan_tx(native_tx_spec(topic, payload.len(), 1))
             .await
@@ -89,10 +91,10 @@ fn send_native_payload(transport: &Arc<UTransportLola>, topic: UUri, payload: &[
 
 fn send_wire_payload<W>(transport: &Arc<UTransportLola>, topic: UUri, payload: &[u8])
 where
-    W: UWireMetadata + PayloadFormat + Default + Send + Sync + 'static,
+    W: UWire + PayloadFormat + Default + Send + Sync + 'static,
 {
     block_on_ready(async {
-        let selected = transport.zero_copy_core().with_wire(W::default());
+        let selected = selected_wire(transport.zero_copy_core(), W::default());
         let mut loan = selected
             .loan_tx(payload_tx_spec_for::<W>(topic, payload.len(), 1))
             .await
@@ -105,7 +107,7 @@ where
 #[cfg(feature = "benchmark-owned")]
 fn send_owned_payload<W>(transport: &Arc<UTransportLola>, topic: UUri, payload: &[u8])
 where
-    W: UWireMetadata + PayloadFormat + Default + Send + Sync + 'static,
+    W: UWire + PayloadFormat + Default + Send + Sync + 'static,
 {
     block_on_ready(async {
         let owned = LolaOwnedCore::new(transport.zero_copy_core()).with_selected_wire(W::default());
@@ -116,6 +118,16 @@ where
         .unwrap();
         owned.send_owned(frame).await.unwrap();
     });
+}
+
+fn selected_wire<W>(
+    core: up_transport_lola_rust::LolaZeroCopyCore,
+    wire: W,
+) -> UWireTransport<up_transport_lola_rust::LolaZeroCopyCore, W, NativePrefixProtobufMetadataCodec>
+where
+    W: UWire,
+{
+    UWireTransport::new(core, wire, NativePrefixProtobufMetadataCodec)
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -160,8 +172,13 @@ impl RecordingListener {
 }
 
 #[async_trait]
-impl UZeroCopyListener<UWireRx<LolaRxLease, UProtocolNativeWire>> for RecordingListener {
-    async fn on_receive_zero_copy(&self, frame: UWireRx<LolaRxLease, UProtocolNativeWire>) {
+impl UZeroCopyListener<UWireRx<LolaRxLease, UProtocolNativeWire, NativePrefixProtobufMetadataCodec>>
+    for RecordingListener
+{
+    async fn on_receive_zero_copy(
+        &self,
+        frame: UWireRx<LolaRxLease, UProtocolNativeWire, NativePrefixProtobufMetadataCodec>,
+    ) {
         self.payloads
             .lock()
             .unwrap()
@@ -170,6 +187,7 @@ impl UZeroCopyListener<UWireRx<LolaRxLease, UProtocolNativeWire>> for RecordingL
 }
 
 #[test]
+#[cfg(any(feature = "test-stub", feature = "lola-ffi"))]
 fn external_xcdrv2_wire_round_trips_payload() {
     let transport = UTransportLola::build(test_config()).unwrap();
     let topic = UUri::try_from("//vehicle/4210/1/9021").expect("valid URI");
@@ -179,7 +197,7 @@ fn external_xcdrv2_wire_round_trips_payload() {
         &up_wire_xcdrv2::VEHICLE_SIGNAL_V1_GOLDEN_BYTES,
     );
 
-    let selected = transport.zero_copy_core().with_wire(XcdrV2Wire);
+    let selected = selected_wire(transport.zero_copy_core(), XcdrV2Wire);
     let frame = block_on_ready(selected.receive_zero_copy(&topic, None)).unwrap();
     let decoded: VehicleSignalV1 = frame.decode_payload().unwrap();
 
@@ -187,12 +205,13 @@ fn external_xcdrv2_wire_round_trips_payload() {
 }
 
 #[test]
+#[cfg(any(feature = "test-stub", feature = "lola-ffi"))]
 fn custom_wire_encoding_round_trips_metadata_and_payload_bytes() {
     let transport = UTransportLola::build(test_config()).unwrap();
     let topic = UUri::try_from("//vehicle/4210/1/9022").expect("valid URI");
     send_wire_payload::<TestCustomWire>(&transport, topic.clone(), b"custom");
 
-    let selected = transport.zero_copy_core().with_wire(TestCustomWire);
+    let selected = selected_wire(transport.zero_copy_core(), TestCustomWire);
     let frame = block_on_ready(selected.receive_zero_copy(&topic, None)).unwrap();
 
     assert_eq!(
@@ -203,11 +222,12 @@ fn custom_wire_encoding_round_trips_metadata_and_payload_bytes() {
 }
 
 #[test]
+#[cfg(any(feature = "test-stub", feature = "lola-ffi"))]
 fn wrong_wire_is_rejected_before_public_receive_exposes_frame() {
     let transport = UTransportLola::build(test_config()).unwrap();
     let topic = UUri::try_from("//vehicle/4210/1/9023").expect("valid URI");
     send_wire_payload::<ProtobufWire>(&transport, topic.clone(), b"protobuf bytes");
-    let selected = transport.zero_copy_core().with_wire(UProtocolNativeWire);
+    let selected = selected_wire(transport.zero_copy_core(), UProtocolNativeWire);
 
     let error = match block_on_ready(selected.receive_zero_copy(&topic, None)) {
         Ok(_) => panic!("wrong wire should be rejected"),
@@ -218,11 +238,12 @@ fn wrong_wire_is_rejected_before_public_receive_exposes_frame() {
 }
 
 #[test]
+#[cfg(any(feature = "test-stub", feature = "lola-ffi"))]
 fn no_payload_and_present_empty_payload_are_distinct() {
     let transport = UTransportLola::build(test_config()).unwrap();
     let no_payload_topic = UUri::try_from("//vehicle/4210/1/9025").expect("valid URI");
     let empty_topic = UUri::try_from("//vehicle/4210/1/9026").expect("valid URI");
-    let selected = transport.zero_copy_core().with_wire(UProtocolNativeWire);
+    let selected = selected_wire(transport.zero_copy_core(), UProtocolNativeWire);
     let no_payload_message = UMessageBuilder::publish(no_payload_topic.clone())
         .build()
         .unwrap();
@@ -251,10 +272,11 @@ fn no_payload_and_present_empty_payload_are_distinct() {
 }
 
 #[test]
+#[cfg(any(feature = "test-stub", feature = "lola-ffi"))]
 fn uninit_tx_round_trips_payload() {
     let transport = UTransportLola::build(test_config()).unwrap();
     let topic = UUri::try_from("//vehicle/4210/1/9028").expect("valid URI");
-    let selected = transport.zero_copy_core().with_wire(UProtocolNativeWire);
+    let selected = selected_wire(transport.zero_copy_core(), UProtocolNativeWire);
     let mut loan =
         block_on_ready(selected.loan_uninit_tx(native_tx_spec(topic.clone(), 3, 1))).unwrap();
     for (slot, byte) in loan.payload_uninit_mut().iter_mut().zip(*b"xyz") {
@@ -269,13 +291,17 @@ fn uninit_tx_round_trips_payload() {
 }
 
 #[test]
+#[cfg(any(feature = "test-stub", feature = "lola-ffi"))]
 fn listener_receives_and_drops_after_unregister() {
     let transport = UTransportLola::build(test_config()).unwrap();
-    let selected = transport.zero_copy_core().with_wire(UProtocolNativeWire);
+    let selected = selected_wire(transport.zero_copy_core(), UProtocolNativeWire);
     let topic = UUri::try_from("//vehicle/4210/1/9015").expect("valid URI");
     let listener = Arc::new(RecordingListener::default());
-    let registration: Arc<dyn UZeroCopyListener<UWireRx<LolaRxLease, UProtocolNativeWire>>> =
-        listener.clone();
+    let registration: Arc<
+        dyn UZeroCopyListener<
+            UWireRx<LolaRxLease, UProtocolNativeWire, NativePrefixProtobufMetadataCodec>,
+        >,
+    > = listener.clone();
 
     block_on_ready(selected.register_zero_copy_listener(&topic, None, Arc::clone(&registration)))
         .unwrap();
@@ -287,13 +313,17 @@ fn listener_receives_and_drops_after_unregister() {
 }
 
 #[test]
+#[cfg(any(feature = "test-stub", feature = "lola-ffi"))]
 fn listener_drops_wrong_wire_payload() {
     let transport = UTransportLola::build(test_config()).unwrap();
-    let selected = transport.zero_copy_core().with_wire(UProtocolNativeWire);
+    let selected = selected_wire(transport.zero_copy_core(), UProtocolNativeWire);
     let topic = UUri::try_from("//vehicle/4210/1/9027").expect("valid URI");
     let listener = Arc::new(RecordingListener::default());
-    let registration: Arc<dyn UZeroCopyListener<UWireRx<LolaRxLease, UProtocolNativeWire>>> =
-        listener.clone();
+    let registration: Arc<
+        dyn UZeroCopyListener<
+            UWireRx<LolaRxLease, UProtocolNativeWire, NativePrefixProtobufMetadataCodec>,
+        >,
+    > = listener.clone();
 
     block_on_ready(selected.register_zero_copy_listener(&topic, None, registration)).unwrap();
     send_wire_payload::<ProtobufWire>(&transport, topic, b"drop");
@@ -354,7 +384,7 @@ fn direct_raw_tx_requires_selected_wire() {
 fn tx_loan_rejects_alignment_larger_than_sample_alignment() {
     let transport = UTransportLola::build(test_config()).unwrap();
     let topic = UUri::try_from("//vehicle/4210/1/9008").expect("valid URI");
-    let selected = transport.zero_copy_core().with_wire(UProtocolNativeWire);
+    let selected = selected_wire(transport.zero_copy_core(), UProtocolNativeWire);
     let error = match block_on_ready(selected.loan_tx(native_tx_spec(topic, 1, 16))) {
         Ok(_) => panic!("LoLa TX loan should reject excessive alignment"),
         Err(error) => error,
