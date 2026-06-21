@@ -316,13 +316,21 @@ fn bench_payload_contract_matrix(
 ) {
     let mut group = c.benchmark_group(group_name);
     let diagnostic = BenchDiagnostic::from_env();
+    let case_filter = std::env::var("TRANSPORT_BENCH_CASE").ok();
     for contract in payload_cases {
+        if let Some(filter) = case_filter.as_deref() {
+            if contract.name() != filter {
+                continue;
+            }
+        }
         for &path in payload_contract_paths() {
             if !diagnostic.applies_to(path) {
                 continue;
             }
             let case = BenchCase::new(authority);
-            runtime.block_on(prime_subscriber(transports, &case));
+            if diagnostic != BenchDiagnostic::ZcFilterOnly {
+                runtime.block_on(prime_subscriber(transports, &case));
+            }
             let transported_payload_len = payload_contract_transported_len(path, contract);
             group.bench_function(
                 BenchmarkId::new(
@@ -447,10 +455,11 @@ async fn run_payload_contract_diagnostic(
             }
         }
         BenchDiagnostic::ZcFilterOnly => {
-            let absent = BenchCase::new("vehicle");
+            let absent = UUri::try_from_parts("*", u32::MAX, u8::MAX, u16::MAX)
+                .expect("valid LoLa wildcard source filter");
             let result = tokio::time::timeout(
                 Duration::from_millis(1),
-                transports.zero_copy.receive_zero_copy(&absent.source, None),
+                transports.zero_copy.receive_zero_copy(&absent, None),
             )
             .await;
             black_box(result.is_err());

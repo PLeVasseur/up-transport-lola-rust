@@ -23,6 +23,7 @@ repo_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TRANSPORT_BENCH_SUITE="${TRANSPORT_BENCH_SUITE:-payload-contract}"
 TRANSPORT_BENCH_PROFILE="${TRANSPORT_BENCH_PROFILE:-all}"
 TRANSPORT_BENCH_REPORT_DIR="${TRANSPORT_BENCH_REPORT_DIR:-$DEFAULT_REPORT_DIR}"
+TRANSPORT_BENCH_CASE="${TRANSPORT_BENCH_CASE:-}"
 CRITERION_ARGS="${CRITERION_ARGS:-$DEFAULT_CRITERION_ARGS}"
 BENCH_PIN_PREFIX="${BENCH_PIN_PREFIX:-}"
 CARGO_CMD="${CARGO:-cargo}"
@@ -41,6 +42,7 @@ Environment:
   TRANSPORT_BENCH_REPORT_DIR  Report output directory. Default: target/transport-perf/lola
   TRANSPORT_BENCH_SUITE       raw, payload-contract, or all. Default: payload-contract
   TRANSPORT_BENCH_PROFILE     core, camera, or all. Default: all
+  TRANSPORT_BENCH_CASE        Optional payload-contract fixture name filter.
   CRITERION_ARGS              Criterion args. Default matches representative-v1.
   BENCH_PIN_PREFIX            Optional command prefix for CPU pinning, etc.
   BAZEL                       Bazel/Bazelisk path for bundled LoLa bridge builds.
@@ -198,6 +200,7 @@ run_cargo_bench() {
         read -r -a pin_parts <<<"$BENCH_PIN_PREFIX"
         TRANSPORT_BENCH_SUITE="$TRANSPORT_BENCH_SUITE" \
             TRANSPORT_BENCH_DIAGNOSTIC="$TRANSPORT_BENCH_DIAGNOSTIC" \
+            TRANSPORT_BENCH_CASE="$TRANSPORT_BENCH_CASE" \
             LOLA_BENCH_PROFILE="$profile" \
             LOLA_BENCH_BACKEND="$LOLA_BENCH_BACKEND" \
             BAZEL="$resolved_bazel" \
@@ -205,6 +208,7 @@ run_cargo_bench() {
     else
         TRANSPORT_BENCH_SUITE="$TRANSPORT_BENCH_SUITE" \
             TRANSPORT_BENCH_DIAGNOSTIC="$TRANSPORT_BENCH_DIAGNOSTIC" \
+            TRANSPORT_BENCH_CASE="$TRANSPORT_BENCH_CASE" \
             LOLA_BENCH_PROFILE="$profile" \
             LOLA_BENCH_BACKEND="$LOLA_BENCH_BACKEND" \
             BAZEL="$resolved_bazel" \
@@ -308,6 +312,7 @@ $(command_line owned camera)
 - Profile request: \`$TRANSPORT_BENCH_PROFILE\`
 - Backend: \`$LOLA_BENCH_BACKEND\`
 - Diagnostic selector: \`$TRANSPORT_BENCH_DIAGNOSTIC\`
+- Case filter: \`${TRANSPORT_BENCH_CASE:-none}\`
 - Zero-copy features: \`$zero_copy_features\`
 - Owned features: \`$owned_features\`
 - Criterion args: \`$CRITERION_ARGS\`
