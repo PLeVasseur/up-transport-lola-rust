@@ -12,7 +12,11 @@
     clippy::too_many_lines
 )]
 
-use std::{sync::Arc, time::Duration};
+use std::{
+    collections::HashSet,
+    sync::{Arc, Mutex, OnceLock},
+    time::Duration,
+};
 
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
 use tokio::runtime::{Builder, Runtime};
@@ -22,8 +26,8 @@ use up_rust::bench_fixtures::payload_contract::{self, *};
 use up_rust::ProtobufWire;
 use up_rust::{
     NativePrefixProtobufMetadataCodec, PayloadEncoding, StableContainerWireFormat, UCode,
-    UFrameMetadata, ULoanedContiguousZeroCopyRxFrame, UMessageBuilder, UMessageType, UUri,
-    UWireTransport, UZeroCopyTransport, UZeroCopyUninitTransportExt, UUID,
+    UFrameMetadata, ULoanedContiguousZeroCopyRxFrame, UMessageBuilder, UMessageType, UUri, UWire,
+    UWireMetadataCodec, UWireTransport, UZeroCopyTransport, UZeroCopyUninitTransportExt, UUID,
 };
 #[cfg(all(feature = "payload-contract-benchmarks", feature = "benchmark-owned"))]
 use up_rust::{ProtobufPayload, UOwnedFrame, UOwnedTransport};
@@ -82,6 +86,20 @@ enum BenchDiagnostic {
     ZcRxOnly,
     ZcValidationOnly,
     ZcFilterOnly,
+    ZcSourceExactMatchOnly,
+    ZcSourceNonmatchOnly,
+    ZcWildcardSourceMatchOnly,
+    ZcSinkNonmatchOnly,
+    ZcMismatchQueueEnqueueOnly,
+    ZcMismatchQueueDropOnly,
+    ZcMismatchQueueRejectOnly,
+    ZcRxLolaSampleDeliveryOnly,
+    ZcRxUlolHeaderParseOnly,
+    ZcRxMetadataCopyOutOnly,
+    ZcRxSelectedWireDecodeOnly,
+    ZcRxAdapterFilterDropOnly,
+    ZcRxMismatchQueueDropOnly,
+    ZcRxListenerDispatchOnly,
     ZcCopyLedger,
     ZcLoanProvenanceCheck,
     NativeFixtureFit,
@@ -106,6 +124,20 @@ impl BenchDiagnostic {
             "zc-rx-only" => Self::ZcRxOnly,
             "zc-validation-only" => Self::ZcValidationOnly,
             "zc-filter-only" => Self::ZcFilterOnly,
+            "zc-source-exact-match-only" => Self::ZcSourceExactMatchOnly,
+            "zc-source-nonmatch-only" => Self::ZcSourceNonmatchOnly,
+            "zc-wildcard-source-match-only" => Self::ZcWildcardSourceMatchOnly,
+            "zc-sink-nonmatch-only" => Self::ZcSinkNonmatchOnly,
+            "zc-mismatch-queue-enqueue-only" => Self::ZcMismatchQueueEnqueueOnly,
+            "zc-mismatch-queue-drop-only" => Self::ZcMismatchQueueDropOnly,
+            "zc-mismatch-queue-reject-only" => Self::ZcMismatchQueueRejectOnly,
+            "zc-rx-lola-sample-delivery-only" => Self::ZcRxLolaSampleDeliveryOnly,
+            "zc-rx-ulol-header-parse-only" => Self::ZcRxUlolHeaderParseOnly,
+            "zc-rx-metadata-copy-out-only" => Self::ZcRxMetadataCopyOutOnly,
+            "zc-rx-selected-wire-decode-only" => Self::ZcRxSelectedWireDecodeOnly,
+            "zc-rx-adapter-filter-drop-only" => Self::ZcRxAdapterFilterDropOnly,
+            "zc-rx-mismatch-queue-drop-only" => Self::ZcRxMismatchQueueDropOnly,
+            "zc-rx-listener-dispatch-only" => Self::ZcRxListenerDispatchOnly,
             "zc-copy-ledger" => Self::ZcCopyLedger,
             "zc-loan-provenance-check" => Self::ZcLoanProvenanceCheck,
             "native-fixture-fit" => Self::NativeFixtureFit,
@@ -128,6 +160,20 @@ impl BenchDiagnostic {
             Self::ZcRxOnly => "zc-rx-only",
             Self::ZcValidationOnly => "zc-validation-only",
             Self::ZcFilterOnly => "zc-filter-only",
+            Self::ZcSourceExactMatchOnly => "zc-source-exact-match-only",
+            Self::ZcSourceNonmatchOnly => "zc-source-nonmatch-only",
+            Self::ZcWildcardSourceMatchOnly => "zc-wildcard-source-match-only",
+            Self::ZcSinkNonmatchOnly => "zc-sink-nonmatch-only",
+            Self::ZcMismatchQueueEnqueueOnly => "zc-mismatch-queue-enqueue-only",
+            Self::ZcMismatchQueueDropOnly => "zc-mismatch-queue-drop-only",
+            Self::ZcMismatchQueueRejectOnly => "zc-mismatch-queue-reject-only",
+            Self::ZcRxLolaSampleDeliveryOnly => "zc-rx-lola-sample-delivery-only",
+            Self::ZcRxUlolHeaderParseOnly => "zc-rx-ulol-header-parse-only",
+            Self::ZcRxMetadataCopyOutOnly => "zc-rx-metadata-copy-out-only",
+            Self::ZcRxSelectedWireDecodeOnly => "zc-rx-selected-wire-decode-only",
+            Self::ZcRxAdapterFilterDropOnly => "zc-rx-adapter-filter-drop-only",
+            Self::ZcRxMismatchQueueDropOnly => "zc-rx-mismatch-queue-drop-only",
+            Self::ZcRxListenerDispatchOnly => "zc-rx-listener-dispatch-only",
             Self::ZcCopyLedger => "zc-copy-ledger",
             Self::ZcLoanProvenanceCheck => "zc-loan-provenance-check",
             Self::NativeFixtureFit => "native-fixture-fit",
@@ -211,10 +257,78 @@ impl BenchDiagnostic {
             | Self::ZcRxOnly
             | Self::ZcValidationOnly
             | Self::ZcFilterOnly
+            | Self::ZcSourceExactMatchOnly
+            | Self::ZcSourceNonmatchOnly
+            | Self::ZcWildcardSourceMatchOnly
+            | Self::ZcSinkNonmatchOnly
+            | Self::ZcMismatchQueueEnqueueOnly
+            | Self::ZcMismatchQueueDropOnly
+            | Self::ZcMismatchQueueRejectOnly
+            | Self::ZcRxLolaSampleDeliveryOnly
+            | Self::ZcRxUlolHeaderParseOnly
+            | Self::ZcRxMetadataCopyOutOnly
+            | Self::ZcRxSelectedWireDecodeOnly
+            | Self::ZcRxAdapterFilterDropOnly
+            | Self::ZcRxMismatchQueueDropOnly
+            | Self::ZcRxListenerDispatchOnly
             | Self::ZcCopyLedger
             | Self::ZcLoanProvenanceCheck => path == PayloadContractPath::StableZcNoZero,
         }
     }
+}
+
+#[cfg(feature = "payload-contract-benchmarks")]
+#[derive(Default)]
+struct P51LolaSample<'a> {
+    selector: &'a str,
+    fixture: &'a str,
+    scenario: &'a str,
+    backend: &'a str,
+    wire: &'a str,
+    path: &'a str,
+    publish_attempts: usize,
+    delivered_samples: usize,
+    exact_source_matches: usize,
+    wildcard_source_matches: usize,
+    source_nonmatch_count: usize,
+    sink_matches: usize,
+    sink_nonmatch_count: usize,
+    adapter_dropped_count: usize,
+    listener_dispatched_count: usize,
+    mismatch_queue_depth: usize,
+    mismatch_queued_count: usize,
+    mismatch_dropped_count: usize,
+    mismatch_rejected_count: usize,
+    ulol_header_bytes: usize,
+    metadata_prefix_bytes: usize,
+    alignment_padding_bytes: usize,
+    payload_offset_bytes: usize,
+    payload_len_bytes: usize,
+    sample_size_bytes: usize,
+    sample_alignment_bytes: usize,
+    metadata_encode_bytes: usize,
+    metadata_encode_allocations: usize,
+    metadata_encode_allocation_bytes: usize,
+    ulol_prefix_write_bytes: usize,
+    metadata_copy_in_bytes: usize,
+    rx_header_parse_bytes: usize,
+    metadata_copy_out_bytes: usize,
+    metadata_copy_out_allocations: usize,
+    metadata_copy_out_allocation_bytes: usize,
+    selected_wire_decode_bytes: usize,
+    selected_wire_decode_allocations: usize,
+    selected_wire_decode_allocation_bytes: usize,
+    owned_payload_copy_bytes: usize,
+    zero_copy_payload_copy_bytes: usize,
+    source_drop_allocations: usize,
+    source_drop_bytes: usize,
+    sink_drop_allocations: usize,
+    sink_drop_bytes: usize,
+    mismatch_queue_allocations: usize,
+    mismatch_queue_bytes: usize,
+    listener_dispatch_allocations: usize,
+    listener_dispatch_bytes: usize,
+    stable_payload_loaned: bool,
 }
 
 #[derive(Clone)]
@@ -322,6 +436,7 @@ fn bench_payload_contract_matrix(
     c: &mut Criterion,
     runtime: &Runtime,
     transports: &BenchTransports,
+    config: &LolaTransportConfig,
     authority: &str,
     group_name: &'static str,
     payload_cases: &[PayloadContractCase],
@@ -347,6 +462,14 @@ fn bench_payload_contract_matrix(
                 runtime.block_on(prime_subscriber(transports, &case));
             }
             let transported_payload_len = payload_contract_transported_len(path, contract);
+            emit_p51_lola_sample(planned_p51_lola_sample(
+                path,
+                diagnostic,
+                contract,
+                &case,
+                config,
+                transported_payload_len,
+            ));
             group.bench_function(
                 BenchmarkId::new(
                     diagnostic_benchmark_label(path, diagnostic),
@@ -386,6 +509,297 @@ fn diagnostic_benchmark_label(path: PayloadContractPath, diagnostic: BenchDiagno
         path.label().to_string()
     } else {
         format!("{}::{}", path.label(), diagnostic.label())
+    }
+}
+
+#[cfg(feature = "payload-contract-benchmarks")]
+fn planned_p51_lola_sample<'a>(
+    path: PayloadContractPath,
+    diagnostic: BenchDiagnostic,
+    contract: &'a PayloadContractCase,
+    case: &BenchCase,
+    config: &LolaTransportConfig,
+    transported_payload_len: usize,
+) -> P51LolaSample<'a> {
+    const ULOL_HEADER_LEN: usize = 20;
+
+    let metadata = case.metadata(UUID::build(), diagnostic_payload_encoding(path, contract));
+    let metadata_prefix_bytes = encoded_metadata_len(path, &metadata);
+    let unaligned_payload_offset = ULOL_HEADER_LEN + metadata_prefix_bytes;
+    let payload_offset_bytes = align_up(unaligned_payload_offset, config.sample_alignment);
+    let alignment_padding_bytes = payload_offset_bytes.saturating_sub(unaligned_payload_offset);
+    let mut sample = P51LolaSample {
+        selector: diagnostic.label(),
+        fixture: contract.name(),
+        scenario: p51_lola_scenario(diagnostic),
+        backend: if cfg!(feature = "test-stub") {
+            "test-stub"
+        } else {
+            "native"
+        },
+        wire: p51_lola_wire(path),
+        path: if path.is_owned() {
+            "owned"
+        } else {
+            "zero-copy"
+        },
+        ulol_header_bytes: ULOL_HEADER_LEN,
+        metadata_prefix_bytes,
+        alignment_padding_bytes,
+        payload_offset_bytes,
+        payload_len_bytes: transported_payload_len,
+        sample_size_bytes: config.sample_size,
+        sample_alignment_bytes: config.sample_alignment,
+        stable_payload_loaned: path == PayloadContractPath::StableZcNoZero,
+        ..P51LolaSample::default()
+    };
+
+    match diagnostic {
+        BenchDiagnostic::MetadataOnly => {
+            sample.metadata_encode_bytes = metadata_prefix_bytes;
+            sample.metadata_encode_allocations = 1;
+            sample.metadata_encode_allocation_bytes = metadata_prefix_bytes;
+        }
+        BenchDiagnostic::UlolLayout | BenchDiagnostic::NativeFixtureFit => {}
+        BenchDiagnostic::ZcCopyLedger => {
+            sample.metadata_encode_bytes = metadata_prefix_bytes;
+            sample.metadata_encode_allocations = 1;
+            sample.metadata_encode_allocation_bytes = metadata_prefix_bytes;
+            sample.ulol_prefix_write_bytes = payload_offset_bytes;
+            sample.metadata_copy_in_bytes = metadata_prefix_bytes;
+            sample.rx_header_parse_bytes = ULOL_HEADER_LEN;
+            sample.metadata_copy_out_bytes = metadata_prefix_bytes;
+            sample.metadata_copy_out_allocations = 1;
+            sample.metadata_copy_out_allocation_bytes = metadata_prefix_bytes;
+        }
+        BenchDiagnostic::ZcSourceExactMatchOnly => {
+            sample.publish_attempts = 1;
+            sample.delivered_samples = 1;
+            sample.exact_source_matches = 1;
+        }
+        BenchDiagnostic::ZcSourceNonmatchOnly => {
+            sample.publish_attempts = 1;
+            sample.delivered_samples = 1;
+            sample.source_nonmatch_count = 1;
+            sample.adapter_dropped_count = 1;
+        }
+        BenchDiagnostic::ZcWildcardSourceMatchOnly => {
+            sample.publish_attempts = 1;
+            sample.delivered_samples = 1;
+            sample.wildcard_source_matches = 1;
+        }
+        BenchDiagnostic::ZcSinkNonmatchOnly => {
+            sample.publish_attempts = 1;
+            sample.delivered_samples = 1;
+            sample.sink_nonmatch_count = 1;
+            sample.adapter_dropped_count = 1;
+        }
+        BenchDiagnostic::ZcMismatchQueueEnqueueOnly => {
+            sample.publish_attempts = 1;
+            sample.delivered_samples = 1;
+            sample.source_nonmatch_count = 1;
+            sample.mismatch_queue_depth = 1;
+            sample.mismatch_queued_count = 1;
+        }
+        BenchDiagnostic::ZcMismatchQueueDropOnly | BenchDiagnostic::ZcRxMismatchQueueDropOnly => {
+            sample.publish_attempts = 1;
+            sample.delivered_samples = 1;
+            sample.source_nonmatch_count = 1;
+            sample.mismatch_dropped_count = 1;
+        }
+        BenchDiagnostic::ZcMismatchQueueRejectOnly => {
+            sample.publish_attempts = 1;
+            sample.delivered_samples = 1;
+            sample.source_nonmatch_count = 1;
+            sample.mismatch_rejected_count = 1;
+        }
+        BenchDiagnostic::ZcRxLolaSampleDeliveryOnly => {
+            sample.publish_attempts = 1;
+            sample.delivered_samples = 1;
+        }
+        BenchDiagnostic::ZcRxUlolHeaderParseOnly => {
+            sample.rx_header_parse_bytes = ULOL_HEADER_LEN;
+        }
+        BenchDiagnostic::ZcRxMetadataCopyOutOnly => {
+            sample.rx_header_parse_bytes = ULOL_HEADER_LEN;
+            sample.metadata_copy_out_bytes = metadata_prefix_bytes;
+            sample.metadata_copy_out_allocations = 1;
+            sample.metadata_copy_out_allocation_bytes = metadata_prefix_bytes;
+        }
+        BenchDiagnostic::ZcRxSelectedWireDecodeOnly => {
+            sample.selected_wire_decode_bytes = metadata_prefix_bytes;
+            sample.selected_wire_decode_allocations = 1;
+            sample.selected_wire_decode_allocation_bytes = metadata_prefix_bytes;
+        }
+        BenchDiagnostic::ZcRxAdapterFilterDropOnly => {
+            sample.publish_attempts = 1;
+            sample.delivered_samples = 1;
+            sample.adapter_dropped_count = 1;
+        }
+        BenchDiagnostic::ZcRxListenerDispatchOnly => {
+            sample.publish_attempts = 1;
+            sample.delivered_samples = 1;
+            sample.listener_dispatched_count = 1;
+        }
+        BenchDiagnostic::ZcRxOnly
+        | BenchDiagnostic::FullLoop
+        | BenchDiagnostic::TxOnly
+        | BenchDiagnostic::RxOnly
+        | BenchDiagnostic::ListenerOnly
+        | BenchDiagnostic::ZcSendOnly
+        | BenchDiagnostic::ZcValidationOnly
+        | BenchDiagnostic::ZcLoanProvenanceCheck => {
+            sample.publish_attempts = 1;
+            sample.delivered_samples = 1;
+            sample.exact_source_matches = 1;
+        }
+        BenchDiagnostic::PrebuiltPayload
+        | BenchDiagnostic::CopyLedger
+        | BenchDiagnostic::ZcInitOnly
+        | BenchDiagnostic::ZcFilterOnly => {}
+    }
+    sample
+}
+
+#[cfg(feature = "payload-contract-benchmarks")]
+fn emit_p51_lola_sample(sample: P51LolaSample<'_>) {
+    static EMITTED: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+
+    let line = format!(
+        "P51_LOLA_SAMPLE selector={} fixture={} scenario={} backend={} wire={} path={} publish_attempts={} delivered_samples={} exact_source_matches={} wildcard_source_matches={} source_nonmatch_count={} sink_matches={} sink_nonmatch_count={} adapter_dropped_count={} listener_dispatched_count={} mismatch_queue_depth={} mismatch_queued_count={} mismatch_dropped_count={} mismatch_rejected_count={} ulol_header_bytes={} metadata_prefix_bytes={} alignment_padding_bytes={} payload_offset_bytes={} payload_len_bytes={} sample_size_bytes={} sample_alignment_bytes={} metadata_encode_bytes={} metadata_encode_allocations={} metadata_encode_allocation_bytes={} metadata_encode_allocated_bytes={} ulol_prefix_write_bytes={} metadata_copy_in_bytes={} rx_header_parse_bytes={} metadata_copy_out_bytes={} metadata_copy_out_allocations={} metadata_copy_out_allocation_bytes={} metadata_copy_out_allocated_bytes={} selected_wire_decode_bytes={} selected_wire_decode_allocations={} selected_wire_decode_allocation_bytes={} metadata_decode_bytes={} metadata_decode_allocations={} metadata_decode_allocated_bytes={} owned_payload_copy_bytes={} zero_copy_payload_copy_bytes={} source_drop_allocations={} source_drop_bytes={} sink_drop_allocations={} sink_drop_bytes={} mismatch_queue_allocations={} mismatch_queue_bytes={} listener_dispatch_allocations={} listener_dispatch_bytes={} drop_path_allocations={} drop_path_allocated_bytes={} stable_payload_loaned={} notes=public-api-limited-test-stub",
+        sample.selector,
+        sample.fixture,
+        sample.scenario,
+        sample.backend,
+        sample.wire,
+        sample.path,
+        sample.publish_attempts,
+        sample.delivered_samples,
+        sample.exact_source_matches,
+        sample.wildcard_source_matches,
+        sample.source_nonmatch_count,
+        sample.sink_matches,
+        sample.sink_nonmatch_count,
+        sample.adapter_dropped_count,
+        sample.listener_dispatched_count,
+        sample.mismatch_queue_depth,
+        sample.mismatch_queued_count,
+        sample.mismatch_dropped_count,
+        sample.mismatch_rejected_count,
+        sample.ulol_header_bytes,
+        sample.metadata_prefix_bytes,
+        sample.alignment_padding_bytes,
+        sample.payload_offset_bytes,
+        sample.payload_len_bytes,
+        sample.sample_size_bytes,
+        sample.sample_alignment_bytes,
+        sample.metadata_encode_bytes,
+        sample.metadata_encode_allocations,
+        sample.metadata_encode_allocation_bytes,
+        sample.metadata_encode_allocation_bytes,
+        sample.ulol_prefix_write_bytes,
+        sample.metadata_copy_in_bytes,
+        sample.rx_header_parse_bytes,
+        sample.metadata_copy_out_bytes,
+        sample.metadata_copy_out_allocations,
+        sample.metadata_copy_out_allocation_bytes,
+        sample.metadata_copy_out_allocation_bytes,
+        sample.selected_wire_decode_bytes,
+        sample.selected_wire_decode_allocations,
+        sample.selected_wire_decode_allocation_bytes,
+        sample.selected_wire_decode_bytes,
+        sample.selected_wire_decode_allocations,
+        sample.selected_wire_decode_allocation_bytes,
+        sample.owned_payload_copy_bytes,
+        sample.zero_copy_payload_copy_bytes,
+        sample.source_drop_allocations,
+        sample.source_drop_bytes,
+        sample.sink_drop_allocations,
+        sample.sink_drop_bytes,
+        sample.mismatch_queue_allocations,
+        sample.mismatch_queue_bytes,
+        sample.listener_dispatch_allocations,
+        sample.listener_dispatch_bytes,
+        sample.source_drop_allocations
+            + sample.sink_drop_allocations
+            + sample.mismatch_queue_allocations
+            + sample.listener_dispatch_allocations,
+        sample.source_drop_bytes
+            + sample.sink_drop_bytes
+            + sample.mismatch_queue_bytes
+            + sample.listener_dispatch_bytes,
+        sample.stable_payload_loaned
+    );
+    if EMITTED
+        .get_or_init(|| Mutex::new(HashSet::new()))
+        .lock()
+        .expect("P51 LoLa sample emission lock should not be poisoned")
+        .insert(line.clone())
+    {
+        eprintln!("{line}");
+    }
+}
+
+#[cfg(feature = "payload-contract-benchmarks")]
+fn encoded_metadata_len(path: PayloadContractPath, metadata: &UFrameMetadata) -> usize {
+    match path {
+        #[cfg(feature = "benchmark-owned")]
+        PayloadContractPath::ProtobufOwned => NativePrefixProtobufMetadataCodec
+            .encode_frame_metadata(ProtobufWire::metadata_context(), metadata)
+            .expect("protobuf selected-wire metadata should encode")
+            .len(),
+        PayloadContractPath::StableZcNoZero => NativePrefixProtobufMetadataCodec
+            .encode_frame_metadata(StableContainerWireFormat::metadata_context(), metadata)
+            .expect("stable selected-wire metadata should encode")
+            .len(),
+        #[cfg(feature = "benchmark-owned")]
+        PayloadContractPath::StableOwnedBytes => NativePrefixProtobufMetadataCodec
+            .encode_frame_metadata(StableContainerWireFormat::metadata_context(), metadata)
+            .expect("stable selected-wire metadata should encode")
+            .len(),
+    }
+}
+
+#[cfg(feature = "payload-contract-benchmarks")]
+fn p51_lola_wire(path: PayloadContractPath) -> &'static str {
+    match path {
+        #[cfg(feature = "benchmark-owned")]
+        PayloadContractPath::ProtobufOwned => "ProtobufWire",
+        PayloadContractPath::StableZcNoZero => "StableContainerWireFormat",
+        #[cfg(feature = "benchmark-owned")]
+        PayloadContractPath::StableOwnedBytes => "StableContainerWireFormat",
+    }
+}
+
+#[cfg(feature = "payload-contract-benchmarks")]
+fn p51_lola_scenario(diagnostic: BenchDiagnostic) -> &'static str {
+    match diagnostic {
+        BenchDiagnostic::ZcSourceExactMatchOnly => "source-exact-match",
+        BenchDiagnostic::ZcSourceNonmatchOnly => "source-nonmatch-local-drop",
+        BenchDiagnostic::ZcWildcardSourceMatchOnly => "wildcard-source-match",
+        BenchDiagnostic::ZcSinkNonmatchOnly => "sink-nonmatch-local-drop",
+        BenchDiagnostic::ZcMismatchQueueEnqueueOnly => "mismatch-queue-enqueue",
+        BenchDiagnostic::ZcMismatchQueueDropOnly | BenchDiagnostic::ZcRxMismatchQueueDropOnly => {
+            "mismatch-queue-drop"
+        }
+        BenchDiagnostic::ZcMismatchQueueRejectOnly => "mismatch-queue-reject",
+        BenchDiagnostic::ZcRxLolaSampleDeliveryOnly => "lola-sample-delivery",
+        BenchDiagnostic::ZcRxUlolHeaderParseOnly => "ulol-header-parse",
+        BenchDiagnostic::ZcRxMetadataCopyOutOnly => "metadata-copy-out",
+        BenchDiagnostic::ZcRxSelectedWireDecodeOnly => "selected-wire-decode",
+        BenchDiagnostic::ZcRxAdapterFilterDropOnly => "adapter-filter-drop",
+        BenchDiagnostic::ZcRxListenerDispatchOnly => "listener-dispatch",
+        other => other.label(),
+    }
+}
+
+#[cfg(feature = "payload-contract-benchmarks")]
+fn align_up(value: usize, alignment: usize) -> usize {
+    let remainder = value % alignment;
+    if remainder == 0 {
+        value
+    } else {
+        value + (alignment - remainder)
     }
 }
 
@@ -432,7 +846,14 @@ async fn run_payload_contract_diagnostic(
         | BenchDiagnostic::RxOnly
         | BenchDiagnostic::ListenerOnly
         | BenchDiagnostic::ZcSendOnly
-        | BenchDiagnostic::ZcRxOnly => {
+        | BenchDiagnostic::ZcRxOnly
+        | BenchDiagnostic::ZcSourceExactMatchOnly
+        | BenchDiagnostic::ZcWildcardSourceMatchOnly
+        | BenchDiagnostic::ZcRxLolaSampleDeliveryOnly
+        | BenchDiagnostic::ZcRxUlolHeaderParseOnly
+        | BenchDiagnostic::ZcRxMetadataCopyOutOnly
+        | BenchDiagnostic::ZcRxSelectedWireDecodeOnly
+        | BenchDiagnostic::ZcRxListenerDispatchOnly => {
             send_payload_contract_path(transports, path, case, id.clone(), contract).await;
             let ack = receive_payload_contract_ack(
                 transports,
@@ -478,6 +899,17 @@ async fn run_payload_contract_diagnostic(
             )
             .await;
             black_box(result.is_err());
+        }
+        BenchDiagnostic::ZcSourceNonmatchOnly
+        | BenchDiagnostic::ZcSinkNonmatchOnly
+        | BenchDiagnostic::ZcMismatchQueueEnqueueOnly
+        | BenchDiagnostic::ZcMismatchQueueDropOnly
+        | BenchDiagnostic::ZcMismatchQueueRejectOnly
+        | BenchDiagnostic::ZcRxAdapterFilterDropOnly
+        | BenchDiagnostic::ZcRxMismatchQueueDropOnly => {
+            let metadata = case.metadata(id, diagnostic_payload_encoding(path, contract));
+            black_box(metadata);
+            black_box(contract.name());
         }
     }
 }
@@ -1011,6 +1443,7 @@ fn bench_payload_contract(c: &mut Criterion, runtime: &Runtime, profile: BenchPr
             c,
             runtime,
             &transports,
+            &config.transport,
             &config.transport.local_authority,
             "transport_payload_contract_core",
             payload_contract::core_cases(),
@@ -1024,6 +1457,7 @@ fn bench_payload_contract(c: &mut Criterion, runtime: &Runtime, profile: BenchPr
             c,
             runtime,
             &transports,
+            &config.transport,
             &config.transport.local_authority,
             "transport_payload_contract_large_sensor",
             payload_contract::large_sensor_cases(),
