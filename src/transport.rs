@@ -515,7 +515,7 @@ impl UZeroCopyTransportCore for UTransportLola {
         let metadata = spec.metadata().clone();
         let encoded_metadata = spec.encoded_metadata().to_vec();
         let payload_len = spec.payload_len();
-        let alignment = spec.payload_alignment();
+        let alignment = spec.payload_alignment_proof().as_usize();
         self.validate_payload_alignment(alignment)?;
 
         #[cfg(feature = "lola-ffi")]
@@ -687,7 +687,7 @@ impl UZeroCopyUninitTransportCore for UTransportLola {
         let metadata = spec.metadata().clone();
         let encoded_metadata = spec.encoded_metadata().to_vec();
         let payload_len = spec.payload_len();
-        let alignment = spec.payload_alignment();
+        let alignment = spec.payload_alignment_proof().as_usize();
         self.validate_payload_alignment(alignment)?;
 
         #[cfg(feature = "lola-ffi")]
