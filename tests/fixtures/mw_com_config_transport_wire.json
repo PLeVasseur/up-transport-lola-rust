@@ -1,0 +1,253 @@
+{
+  "serviceTypes": [
+    {
+      "serviceTypeName": "uprotocol.LoLa",
+      "version": {
+        "major": 1,
+        "minor": 0
+      },
+      "bindings": [
+        {
+          "binding": "SHM",
+          "serviceId": 9021,
+          "events": [
+            {
+              "eventName": "UProtocolFrame",
+              "eventId": 1
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "serviceInstances": [
+    {
+      "instanceSpecifier": "lola/transport_wire/external_xcdrv2",
+      "serviceTypeName": "uprotocol.LoLa",
+      "version": { "major": 1, "minor": 0 },
+      "instances": [
+        {
+          "instanceId": 1,
+          "asil-level": "QM",
+          "binding": "SHM",
+          "events": [
+            {
+              "eventName": "UProtocolFrame",
+              "numberOfSampleSlots": 128,
+              "maxSubscribers": 32,
+              "numberOfIpcTracingSlots": 0
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "instanceSpecifier": "lola/transport_wire/custom_wire",
+      "serviceTypeName": "uprotocol.LoLa",
+      "version": { "major": 1, "minor": 0 },
+      "instances": [
+        {
+          "instanceId": 2,
+          "asil-level": "QM",
+          "binding": "SHM",
+          "events": [
+            {
+              "eventName": "UProtocolFrame",
+              "numberOfSampleSlots": 128,
+              "maxSubscribers": 32,
+              "numberOfIpcTracingSlots": 0
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "instanceSpecifier": "lola/transport_wire/wrong_wire",
+      "serviceTypeName": "uprotocol.LoLa",
+      "version": { "major": 1, "minor": 0 },
+      "instances": [
+        {
+          "instanceId": 3,
+          "asil-level": "QM",
+          "binding": "SHM",
+          "events": [
+            {
+              "eventName": "UProtocolFrame",
+              "numberOfSampleSlots": 128,
+              "maxSubscribers": 32,
+              "numberOfIpcTracingSlots": 0
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "instanceSpecifier": "lola/transport_wire/empty_payload",
+      "serviceTypeName": "uprotocol.LoLa",
+      "version": { "major": 1, "minor": 0 },
+      "instances": [
+        {
+          "instanceId": 4,
+          "asil-level": "QM",
+          "binding": "SHM",
+          "events": [
+            {
+              "eventName": "UProtocolFrame",
+              "numberOfSampleSlots": 128,
+              "maxSubscribers": 32,
+              "numberOfIpcTracingSlots": 0
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "instanceSpecifier": "lola/transport_wire/uninit_tx",
+      "serviceTypeName": "uprotocol.LoLa",
+      "version": { "major": 1, "minor": 0 },
+      "instances": [
+        {
+          "instanceId": 5,
+          "asil-level": "QM",
+          "binding": "SHM",
+          "events": [
+            {
+              "eventName": "UProtocolFrame",
+              "numberOfSampleSlots": 128,
+              "maxSubscribers": 32,
+              "numberOfIpcTracingSlots": 0
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "instanceSpecifier": "lola/transport_wire/listener_delivery",
+      "serviceTypeName": "uprotocol.LoLa",
+      "version": { "major": 1, "minor": 0 },
+      "instances": [
+        {
+          "instanceId": 6,
+          "asil-level": "QM",
+          "binding": "SHM",
+          "events": [
+            {
+              "eventName": "UProtocolFrame",
+              "numberOfSampleSlots": 128,
+              "maxSubscribers": 32,
+              "numberOfIpcTracingSlots": 0
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "instanceSpecifier": "lola/transport_wire/listener_wrong_wire",
+      "serviceTypeName": "uprotocol.LoLa",
+      "version": { "major": 1, "minor": 0 },
+      "instances": [
+        {
+          "instanceId": 7,
+          "asil-level": "QM",
+          "binding": "SHM",
+          "events": [
+            {
+              "eventName": "UProtocolFrame",
+              "numberOfSampleSlots": 128,
+              "maxSubscribers": 32,
+              "numberOfIpcTracingSlots": 0
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "instanceSpecifier": "lola/transport_wire/owned_xcdrv2",
+      "serviceTypeName": "uprotocol.LoLa",
+      "version": { "major": 1, "minor": 0 },
+      "instances": [
+        {
+          "instanceId": 8,
+          "asil-level": "QM",
+          "binding": "SHM",
+          "events": [
+            {
+              "eventName": "UProtocolFrame",
+              "numberOfSampleSlots": 128,
+              "maxSubscribers": 32,
+              "numberOfIpcTracingSlots": 0
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "instanceSpecifier": "lola/transport_wire/owned_wrong_wire",
+      "serviceTypeName": "uprotocol.LoLa",
+      "version": { "major": 1, "minor": 0 },
+      "instances": [
+        {
+          "instanceId": 9,
+          "asil-level": "QM",
+          "binding": "SHM",
+          "events": [
+            {
+              "eventName": "UProtocolFrame",
+              "numberOfSampleSlots": 128,
+              "maxSubscribers": 32,
+              "numberOfIpcTracingSlots": 0
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "instanceSpecifier": "lola/transport_wire/direct_raw_tx",
+      "serviceTypeName": "uprotocol.LoLa",
+      "version": { "major": 1, "minor": 0 },
+      "instances": [
+        {
+          "instanceId": 10,
+          "asil-level": "QM",
+          "binding": "SHM",
+          "events": [
+            {
+              "eventName": "UProtocolFrame",
+              "numberOfSampleSlots": 128,
+              "maxSubscribers": 32,
+              "numberOfIpcTracingSlots": 0
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "instanceSpecifier": "lola/transport_wire/alignment_rejection",
+      "serviceTypeName": "uprotocol.LoLa",
+      "version": { "major": 1, "minor": 0 },
+      "instances": [
+        {
+          "instanceId": 11,
+          "asil-level": "QM",
+          "binding": "SHM",
+          "events": [
+            {
+              "eventName": "UProtocolFrame",
+              "numberOfSampleSlots": 128,
+              "maxSubscribers": 32,
+              "numberOfIpcTracingSlots": 0
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "global": {
+    "asil-level": "QM",
+    "queue-size": {
+      "QM-receiver": 128,
+      "QM-sender": 128
+    },
+    "shm-size-calc-mode": "SIMULATION"
+  }
+}

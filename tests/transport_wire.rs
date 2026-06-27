@@ -34,10 +34,10 @@ fn block_on_ready<T>(future: impl Future<Output = T>) -> T {
     }
 }
 
-fn test_config() -> LolaTransportConfig {
+fn test_config(instance_specifier: &str) -> LolaTransportConfig {
     LolaTransportConfig {
         local_authority: "vehicle".to_string(),
-        instance_specifier: "lola/service/instance".to_string(),
+        instance_specifier: instance_specifier.to_string(),
         service_type: "uprotocol.LoLa".to_string(),
         event_name: "UProtocolFrame".to_string(),
         sample_size: 256,
@@ -46,8 +46,31 @@ fn test_config() -> LolaTransportConfig {
         pull_mismatch_queue_capacity: LolaTransportConfig::DEFAULT_PULL_MISMATCH_QUEUE_CAPACITY,
         pull_mismatch_queue_full_policy:
             LolaTransportConfig::DEFAULT_PULL_MISMATCH_QUEUE_FULL_POLICY,
-        mw_com_config_path: None,
+        mw_com_config_path: native_mw_com_config_path(),
     }
+}
+
+#[cfg(feature = "lola-ffi")]
+fn native_mw_com_config_path() -> Option<String> {
+    Some(
+        concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/mw_com_config_transport_wire.json"
+        )
+        .to_string(),
+    )
+}
+
+#[cfg(not(feature = "lola-ffi"))]
+fn native_mw_com_config_path() -> Option<String> {
+    None
+}
+
+fn runtime() -> tokio::runtime::Runtime {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_time()
+        .build()
+        .expect("LoLa listener test runtime")
 }
 
 fn metadata_with_encoding(topic: UUri, encoding: PayloadEncoding) -> UFrameMetadata {
@@ -189,7 +212,8 @@ impl UZeroCopyListener<UWireRx<LolaRxLease, UProtocolNativeWire, NativePrefixPro
 #[test]
 #[cfg(any(feature = "test-stub", feature = "lola-ffi"))]
 fn external_xcdrv2_wire_round_trips_payload() {
-    let transport = UTransportLola::build(test_config()).unwrap();
+    let transport =
+        UTransportLola::build(test_config("lola/transport_wire/external_xcdrv2")).unwrap();
     let topic = UUri::try_from("//vehicle/4210/1/9021").expect("valid URI");
     send_wire_payload::<XcdrV2Wire>(
         &transport,
@@ -207,7 +231,7 @@ fn external_xcdrv2_wire_round_trips_payload() {
 #[test]
 #[cfg(any(feature = "test-stub", feature = "lola-ffi"))]
 fn custom_wire_encoding_round_trips_metadata_and_payload_bytes() {
-    let transport = UTransportLola::build(test_config()).unwrap();
+    let transport = UTransportLola::build(test_config("lola/transport_wire/custom_wire")).unwrap();
     let topic = UUri::try_from("//vehicle/4210/1/9022").expect("valid URI");
     send_wire_payload::<TestCustomWire>(&transport, topic.clone(), b"custom");
 
@@ -224,7 +248,7 @@ fn custom_wire_encoding_round_trips_metadata_and_payload_bytes() {
 #[test]
 #[cfg(any(feature = "test-stub", feature = "lola-ffi"))]
 fn wrong_wire_is_rejected_before_public_receive_exposes_frame() {
-    let transport = UTransportLola::build(test_config()).unwrap();
+    let transport = UTransportLola::build(test_config("lola/transport_wire/wrong_wire")).unwrap();
     let topic = UUri::try_from("//vehicle/4210/1/9023").expect("valid URI");
     send_wire_payload::<ProtobufWire>(&transport, topic.clone(), b"protobuf bytes");
     let selected = selected_wire(transport.zero_copy_core(), UProtocolNativeWire);
@@ -240,7 +264,8 @@ fn wrong_wire_is_rejected_before_public_receive_exposes_frame() {
 #[test]
 #[cfg(any(feature = "test-stub", feature = "lola-ffi"))]
 fn no_payload_and_present_empty_payload_are_distinct() {
-    let transport = UTransportLola::build(test_config()).unwrap();
+    let transport =
+        UTransportLola::build(test_config("lola/transport_wire/empty_payload")).unwrap();
     let no_payload_topic = UUri::try_from("//vehicle/4210/1/9025").expect("valid URI");
     let empty_topic = UUri::try_from("//vehicle/4210/1/9026").expect("valid URI");
     let selected = selected_wire(transport.zero_copy_core(), UProtocolNativeWire);
@@ -253,6 +278,8 @@ fn no_payload_and_present_empty_payload_are_distinct() {
         block_on_ready(selected.loan_tx(UTxLoanSpec::no_payload(no_payload_metadata).unwrap()))
             .unwrap();
     block_on_ready(selected.send_zero_copy(no_payload_loan)).unwrap();
+    let no_payload = receive_with_retry(&selected, &no_payload_topic);
+
     let empty_metadata = metadata_with_encoding(
         empty_topic.clone(),
         PayloadEncoding::Standard(UPayloadFormat::Raw),
@@ -262,19 +289,42 @@ fn no_payload_and_present_empty_payload_are_distinct() {
     )
     .unwrap();
     block_on_ready(selected.send_zero_copy(empty_loan)).unwrap();
-
-    let no_payload = block_on_ready(selected.receive_zero_copy(&no_payload_topic, None)).unwrap();
-    let empty = block_on_ready(selected.receive_zero_copy(&empty_topic, None)).unwrap();
+    let empty = receive_with_retry(&selected, &empty_topic);
 
     assert!(!no_payload.has_payload());
     assert!(empty.has_payload());
     assert_eq!(empty.payload_len(), 0);
 }
 
+fn receive_with_retry<W>(
+    selected: &UWireTransport<
+        up_transport_lola_rust::LolaZeroCopyCore,
+        W,
+        NativePrefixProtobufMetadataCodec,
+    >,
+    topic: &UUri,
+) -> UWireRx<LolaRxLease, W, NativePrefixProtobufMetadataCodec>
+where
+    W: UWire + Send + Sync + 'static,
+{
+    let mut last_error = None;
+    for _ in 0..50 {
+        match block_on_ready(selected.receive_zero_copy(topic, None)) {
+            Ok(frame) => return frame,
+            Err(error) if error.get_code() == UCode::NotFound => {
+                last_error = Some(error);
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            Err(error) => panic!("unexpected LoLa receive error: {error:?}"),
+        }
+    }
+    panic!("LoLa receive did not return a frame: {last_error:?}");
+}
+
 #[test]
 #[cfg(any(feature = "test-stub", feature = "lola-ffi"))]
 fn uninit_tx_round_trips_payload() {
-    let transport = UTransportLola::build(test_config()).unwrap();
+    let transport = UTransportLola::build(test_config("lola/transport_wire/uninit_tx")).unwrap();
     let topic = UUri::try_from("//vehicle/4210/1/9028").expect("valid URI");
     let selected = selected_wire(transport.zero_copy_core(), UProtocolNativeWire);
     let mut loan =
@@ -293,48 +343,65 @@ fn uninit_tx_round_trips_payload() {
 #[test]
 #[cfg(any(feature = "test-stub", feature = "lola-ffi"))]
 fn listener_receives_and_drops_after_unregister() {
-    let transport = UTransportLola::build(test_config()).unwrap();
-    let selected = selected_wire(transport.zero_copy_core(), UProtocolNativeWire);
-    let topic = UUri::try_from("//vehicle/4210/1/9015").expect("valid URI");
-    let listener = Arc::new(RecordingListener::default());
-    let registration: Arc<
-        dyn UZeroCopyListener<
-            UWireRx<LolaRxLease, UProtocolNativeWire, NativePrefixProtobufMetadataCodec>,
-        >,
-    > = listener.clone();
+    runtime().block_on(async {
+        let transport =
+            UTransportLola::build(test_config("lola/transport_wire/listener_delivery")).unwrap();
+        let selected = selected_wire(transport.zero_copy_core(), UProtocolNativeWire);
+        let topic = UUri::try_from("//vehicle/4210/1/9015").expect("valid URI");
+        let listener = Arc::new(RecordingListener::default());
+        let registration: Arc<
+            dyn UZeroCopyListener<
+                UWireRx<LolaRxLease, UProtocolNativeWire, NativePrefixProtobufMetadataCodec>,
+            >,
+        > = listener.clone();
 
-    block_on_ready(selected.register_zero_copy_listener(&topic, None, Arc::clone(&registration)))
-        .unwrap();
-    send_native_payload(&transport, topic.clone(), b"listen");
-    block_on_ready(selected.unregister_zero_copy_listener(&topic, None, registration)).unwrap();
-    send_native_payload(&transport, topic, b"ignored");
+        selected
+            .register_zero_copy_listener(&topic, None, Arc::clone(&registration))
+            .await
+            .unwrap();
+        send_native_payload(&transport, topic.clone(), b"listen");
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        selected
+            .unregister_zero_copy_listener(&topic, None, registration)
+            .await
+            .unwrap();
+        send_native_payload(&transport, topic, b"ignored");
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
 
-    assert_eq!(listener.payloads(), vec![b"listen".to_vec()]);
+        assert_eq!(listener.payloads(), vec![b"listen".to_vec()]);
+    });
 }
 
 #[test]
 #[cfg(any(feature = "test-stub", feature = "lola-ffi"))]
 fn listener_drops_wrong_wire_payload() {
-    let transport = UTransportLola::build(test_config()).unwrap();
-    let selected = selected_wire(transport.zero_copy_core(), UProtocolNativeWire);
-    let topic = UUri::try_from("//vehicle/4210/1/9027").expect("valid URI");
-    let listener = Arc::new(RecordingListener::default());
-    let registration: Arc<
-        dyn UZeroCopyListener<
-            UWireRx<LolaRxLease, UProtocolNativeWire, NativePrefixProtobufMetadataCodec>,
-        >,
-    > = listener.clone();
+    runtime().block_on(async {
+        let transport =
+            UTransportLola::build(test_config("lola/transport_wire/listener_wrong_wire")).unwrap();
+        let selected = selected_wire(transport.zero_copy_core(), UProtocolNativeWire);
+        let topic = UUri::try_from("//vehicle/4210/1/9027").expect("valid URI");
+        let listener = Arc::new(RecordingListener::default());
+        let registration: Arc<
+            dyn UZeroCopyListener<
+                UWireRx<LolaRxLease, UProtocolNativeWire, NativePrefixProtobufMetadataCodec>,
+            >,
+        > = listener.clone();
 
-    block_on_ready(selected.register_zero_copy_listener(&topic, None, registration)).unwrap();
-    send_wire_payload::<ProtobufWire>(&transport, topic, b"drop");
+        selected
+            .register_zero_copy_listener(&topic, None, registration)
+            .await
+            .unwrap();
+        send_wire_payload::<ProtobufWire>(&transport, topic, b"drop");
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
 
-    assert!(listener.payloads().is_empty());
+        assert!(listener.payloads().is_empty());
+    });
 }
 
 #[cfg(feature = "benchmark-owned")]
 #[test]
 fn owned_core_round_trips_external_xcdrv2_payload() {
-    let transport = UTransportLola::build(test_config()).unwrap();
+    let transport = UTransportLola::build(test_config("lola/transport_wire/owned_xcdrv2")).unwrap();
     let topic = UUri::try_from("//vehicle/4210/1/9031").expect("valid URI");
     send_owned_payload::<XcdrV2Wire>(
         &transport,
@@ -354,7 +421,8 @@ fn owned_core_round_trips_external_xcdrv2_payload() {
 #[cfg(feature = "benchmark-owned")]
 #[test]
 fn owned_core_wrong_wire_is_rejected_before_public_receive_exposes_frame() {
-    let transport = UTransportLola::build(test_config()).unwrap();
+    let transport =
+        UTransportLola::build(test_config("lola/transport_wire/owned_wrong_wire")).unwrap();
     let topic = UUri::try_from("//vehicle/4210/1/9032").expect("valid URI");
     send_owned_payload::<ProtobufWire>(&transport, topic.clone(), b"protobuf bytes");
 
@@ -370,7 +438,8 @@ fn owned_core_wrong_wire_is_rejected_before_public_receive_exposes_frame() {
 
 #[test]
 fn direct_raw_tx_requires_selected_wire() {
-    let transport = UTransportLola::build(test_config()).unwrap();
+    let transport =
+        UTransportLola::build(test_config("lola/transport_wire/direct_raw_tx")).unwrap();
     let topic = UUri::try_from("//vehicle/4210/1/9008").expect("valid URI");
     let error = match block_on_ready(transport.loan_tx(native_tx_spec(topic, 1, 1))) {
         Ok(_) => panic!("direct raw TX should require selected wire"),
@@ -382,7 +451,8 @@ fn direct_raw_tx_requires_selected_wire() {
 
 #[test]
 fn tx_loan_rejects_alignment_larger_than_sample_alignment() {
-    let transport = UTransportLola::build(test_config()).unwrap();
+    let transport =
+        UTransportLola::build(test_config("lola/transport_wire/alignment_rejection")).unwrap();
     let topic = UUri::try_from("//vehicle/4210/1/9008").expect("valid URI");
     let selected = selected_wire(transport.zero_copy_core(), UProtocolNativeWire);
     let error = match block_on_ready(selected.loan_tx(native_tx_spec(topic, 1, 16))) {
