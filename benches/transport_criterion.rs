@@ -568,9 +568,6 @@ fn planned_p51_lola_sample<'a>(
             sample.ulol_prefix_write_bytes = payload_offset_bytes;
             sample.metadata_copy_in_bytes = metadata_prefix_bytes;
             sample.rx_header_parse_bytes = ULOL_HEADER_LEN;
-            sample.metadata_copy_out_bytes = metadata_prefix_bytes;
-            sample.metadata_copy_out_allocations = 1;
-            sample.metadata_copy_out_allocation_bytes = metadata_prefix_bytes;
         }
         BenchDiagnostic::ZcSourceExactMatchOnly => {
             sample.publish_attempts = 1;
@@ -622,9 +619,6 @@ fn planned_p51_lola_sample<'a>(
         }
         BenchDiagnostic::ZcRxMetadataCopyOutOnly => {
             sample.rx_header_parse_bytes = ULOL_HEADER_LEN;
-            sample.metadata_copy_out_bytes = metadata_prefix_bytes;
-            sample.metadata_copy_out_allocations = 1;
-            sample.metadata_copy_out_allocation_bytes = metadata_prefix_bytes;
         }
         BenchDiagnostic::ZcRxSelectedWireDecodeOnly => {
             sample.selected_wire_decode_bytes = metadata_prefix_bytes;

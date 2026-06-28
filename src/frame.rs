@@ -168,7 +168,7 @@ impl LolaTxLoan {
     pub(crate) fn clone_as_rx(&self) -> LolaRxLease {
         LolaRxLease {
             metadata: self.metadata.clone(),
-            encoded_metadata: self.encoded_metadata.clone(),
+            metadata_len: self.encoded_metadata.len(),
             sample: LolaRxStorage::Vec(self.sample.as_slice().to_vec()),
             payload_offset: self.payload_offset,
             payload_len: self.payload_len,
@@ -322,7 +322,7 @@ impl UUninitTxBuffer for LolaUninitTxLoan {
 /// the sample and exclude the hidden LoLa frame header, metadata, and padding.
 pub struct LolaRxLease {
     metadata: UFrameMetadata,
-    encoded_metadata: Vec<u8>,
+    metadata_len: usize,
     sample: LolaRxStorage,
     payload_offset: usize,
     payload_len: usize,
@@ -332,7 +332,7 @@ impl Clone for LolaRxLease {
     fn clone(&self) -> Self {
         Self {
             metadata: self.metadata.clone(),
-            encoded_metadata: self.encoded_metadata.clone(),
+            metadata_len: self.metadata_len,
             sample: self.sample.clone(),
             payload_offset: self.payload_offset,
             payload_len: self.payload_len,
@@ -380,10 +380,10 @@ impl LolaRxStorage {
 impl LolaRxLease {
     #[cfg(feature = "test-stub")]
     pub(crate) fn from_vec(sample: Vec<u8>) -> Result<Self, UStatus> {
-        let (encoded_metadata, payload_offset, payload_len) = read_frame_header(&sample)?;
+        let (metadata_len, payload_offset, payload_len) = read_frame_header(&sample)?;
         Ok(Self {
             metadata: unavailable_metadata(),
-            encoded_metadata,
+            metadata_len,
             sample: LolaRxStorage::Vec(sample),
             payload_offset,
             payload_len,
@@ -392,10 +392,10 @@ impl LolaRxLease {
 
     #[cfg(feature = "lola-ffi")]
     pub(crate) fn from_native(sample: NativeRxSample) -> Result<Self, UStatus> {
-        let (encoded_metadata, payload_offset, payload_len) = read_frame_header(sample.as_slice())?;
+        let (metadata_len, payload_offset, payload_len) = read_frame_header(sample.as_slice())?;
         Ok(Self {
             metadata: unavailable_metadata(),
-            encoded_metadata,
+            metadata_len,
             sample: LolaRxStorage::Native(Arc::new(sample)),
             payload_offset,
             payload_len,
@@ -451,7 +451,13 @@ impl UEncodedRxFrame for LolaRxLease {
         Self: 'a;
 
     fn encoded_metadata(&self) -> &[u8] {
-        &self.encoded_metadata
+        let metadata_end = LOLA_FRAME_HEADER_LEN
+            .checked_add(self.metadata_len)
+            .expect("LoLa metadata layout overflow");
+        self.sample
+            .as_slice()
+            .get(LOLA_FRAME_HEADER_LEN..metadata_end)
+            .expect("LoLa metadata layout should be valid")
     }
 
     fn payload_len(&self) -> usize {
@@ -584,7 +590,7 @@ fn write_frame_header_uninit(
     Ok(payload_offset)
 }
 
-fn read_frame_header(sample: &[u8]) -> Result<(Vec<u8>, usize, usize), UStatus> {
+fn read_frame_header(sample: &[u8]) -> Result<(usize, usize, usize), UStatus> {
     if sample.len() < LOLA_FRAME_HEADER_LEN {
         return Err(UStatus::fail_with_code(
             UCode::InvalidArgument,
@@ -621,7 +627,6 @@ fn read_frame_header(sample: &[u8]) -> Result<(Vec<u8>, usize, usize), UStatus> 
             "LoLa metadata range is outside sample bounds",
         ));
     }
-    let encoded_metadata = sample[LOLA_FRAME_HEADER_LEN..metadata_end].to_vec();
     if payload_offset < metadata_end {
         return Err(UStatus::fail_with_code(
             UCode::InvalidArgument,
@@ -637,7 +642,7 @@ fn read_frame_header(sample: &[u8]) -> Result<(Vec<u8>, usize, usize), UStatus> 
             "LoLa payload range is outside sample bounds",
         ));
     }
-    Ok((encoded_metadata, payload_offset, payload_len))
+    Ok((metadata_len, payload_offset, payload_len))
 }
 
 fn frame_layout_bounds(
