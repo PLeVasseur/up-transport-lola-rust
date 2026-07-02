@@ -25,9 +25,11 @@ use up_rust::bench_fixtures::payload_contract::{self, *};
 #[cfg(feature = "benchmark-owned")]
 use up_rust::ProtobufWire;
 use up_rust::{
-    NativePrefixProtobufMetadataCodec, PayloadEncoding, StableContainerWireFormat, UCode,
-    UFrameMetadata, ULoanedContiguousZeroCopyRxFrame, UMessageBuilder, UMessageType, UUri, UWire,
-    UWireMetadataCodec, UWireTransport, UZeroCopyTransport, UZeroCopyUninitTransportExt, UUID,
+    NativePrefixProtobufMetadataCodec, PayloadEncoding, ProtobufWireTransport,
+    StableContainerWireFormat, StableContainerWireTransport, UCode, UFrameMetadata,
+    ULoanedContiguousZeroCopyRxFrame, UMessageBuilder, UMessageType, UUri, UWire,
+    UWireMetadataCodec, UWithNativePrefixWire, UZeroCopyTransport, UZeroCopyUninitTransportExt,
+    UUID,
 };
 #[cfg(all(feature = "payload-contract-benchmarks", feature = "benchmark-owned"))]
 use up_rust::{ProtobufPayload, UOwnedFrame, UOwnedTransport};
@@ -42,6 +44,12 @@ const CORE_MAX_SAMPLES: usize = 128;
 const CAMERA_SAMPLE_SIZE: usize = 16 * 1_024 * 1_024;
 const CAMERA_MAX_SAMPLES: usize = 16;
 const PAYLOAD_CONTRACT_SEQUENCE: u32 = 1;
+
+type StableLolaTransport = StableContainerWireTransport<LolaZeroCopyCore>;
+#[cfg(feature = "benchmark-owned")]
+type ProtobufOwnedLolaTransport = ProtobufWireTransport<LolaOwnedCore>;
+#[cfg(feature = "benchmark-owned")]
+type StableOwnedLolaTransport = StableContainerWireTransport<LolaOwnedCore>;
 
 #[derive(Clone, Copy)]
 enum BenchSuite {
@@ -363,18 +371,11 @@ struct PayloadContractAck {
 }
 
 struct BenchTransports {
-    zero_copy: UWireTransport<
-        LolaZeroCopyCore,
-        StableContainerWireFormat,
-        NativePrefixProtobufMetadataCodec,
-    >,
+    zero_copy: StableLolaTransport,
     #[cfg(feature = "benchmark-owned")]
-    protobuf_owned:
-        Arc<UWireTransport<LolaOwnedCore, ProtobufWire, NativePrefixProtobufMetadataCodec>>,
+    protobuf_owned: Arc<ProtobufOwnedLolaTransport>,
     #[cfg(feature = "benchmark-owned")]
-    stable_owned: Arc<
-        UWireTransport<LolaOwnedCore, StableContainerWireFormat, NativePrefixProtobufMetadataCodec>,
-    >,
+    stable_owned: Arc<StableOwnedLolaTransport>,
 }
 
 impl BenchTransports {
@@ -382,17 +383,11 @@ impl BenchTransports {
         let physical =
             UTransportLola::build(config).expect("LoLa benchmark transport should build");
         let core = physical.zero_copy_core();
-        let zero_copy = UWireTransport::new(
-            core.clone(),
-            StableContainerWireFormat,
-            NativePrefixProtobufMetadataCodec,
-        );
+        let zero_copy = core.clone().into_stable_container_transport();
         #[cfg(feature = "benchmark-owned")]
-        let protobuf_owned =
-            Arc::new(LolaOwnedCore::new(core.clone()).with_selected_wire(ProtobufWire));
+        let protobuf_owned = Arc::new(LolaOwnedCore::new(core.clone()).into_protobuf_transport());
         #[cfg(feature = "benchmark-owned")]
-        let stable_owned =
-            Arc::new(LolaOwnedCore::new(core).with_selected_wire(StableContainerWireFormat));
+        let stable_owned = Arc::new(LolaOwnedCore::new(core).into_stable_container_transport());
         Self {
             zero_copy,
             #[cfg(feature = "benchmark-owned")]
@@ -1004,7 +999,7 @@ async fn send_stable_payload_contract(
         PayloadContractCaseKind::CanClassicMax => {
             transports
                 .zero_copy
-                .send_uninit_stable_payload_as::<CanClassicFrameV1>(metadata, |payload| {
+                .send_uninit_stable_payload::<CanClassicFrameV1>(metadata, |payload| {
                     payload_contract::init_can_classic_max(payload, PAYLOAD_CONTRACT_SEQUENCE)
                 })
                 .await
@@ -1012,7 +1007,7 @@ async fn send_stable_payload_contract(
         PayloadContractCaseKind::CanFdMax => {
             transports
                 .zero_copy
-                .send_uninit_stable_payload_as::<CanFdFrameV1>(metadata, |payload| {
+                .send_uninit_stable_payload::<CanFdFrameV1>(metadata, |payload| {
                     payload_contract::init_can_fd_max(payload, PAYLOAD_CONTRACT_SEQUENCE)
                 })
                 .await
@@ -1020,7 +1015,7 @@ async fn send_stable_payload_contract(
         PayloadContractCaseKind::SomeIpSingleMtu => {
             transports
                 .zero_copy
-                .send_uninit_stable_payload_as::<SomeIpSignalBatchMtuV1>(metadata, |payload| {
+                .send_uninit_stable_payload::<SomeIpSignalBatchMtuV1>(metadata, |payload| {
                     payload_contract::init_someip_single_mtu(payload, PAYLOAD_CONTRACT_SEQUENCE)
                 })
                 .await
@@ -1028,7 +1023,7 @@ async fn send_stable_payload_contract(
         PayloadContractCaseKind::Streamer4k => {
             transports
                 .zero_copy
-                .send_uninit_stable_payload_as::<StreamChunk4kV1>(metadata, |payload| {
+                .send_uninit_stable_payload::<StreamChunk4kV1>(metadata, |payload| {
                     payload_contract::init_streamer_4k(payload, PAYLOAD_CONTRACT_SEQUENCE)
                 })
                 .await
@@ -1036,7 +1031,7 @@ async fn send_stable_payload_contract(
         PayloadContractCaseKind::RadarArs548DetectionList => {
             transports
                 .zero_copy
-                .send_uninit_stable_payload_as::<RadarDetectionListArs548V1>(metadata, |payload| {
+                .send_uninit_stable_payload::<RadarDetectionListArs548V1>(metadata, |payload| {
                     payload_contract::init_radar_ars548_detection_list(
                         payload,
                         PAYLOAD_CONTRACT_SEQUENCE,
@@ -1047,7 +1042,7 @@ async fn send_stable_payload_contract(
         PayloadContractCaseKind::Streamer64k => {
             transports
                 .zero_copy
-                .send_uninit_stable_payload_as::<StreamChunk64kV1>(metadata, |payload| {
+                .send_uninit_stable_payload::<StreamChunk64kV1>(metadata, |payload| {
                     payload_contract::init_streamer_64k(payload, PAYLOAD_CONTRACT_SEQUENCE)
                 })
                 .await
@@ -1056,7 +1051,7 @@ async fn send_stable_payload_contract(
         PayloadContractCaseKind::LidarHesaiAt128PointCloud => {
             transports
                 .zero_copy
-                .send_uninit_stable_payload_as::<LidarPointCloudHesaiAt128V1>(metadata, |payload| {
+                .send_uninit_stable_payload::<LidarPointCloudHesaiAt128V1>(metadata, |payload| {
                     payload_contract::init_lidar_hesai_at128_point_cloud(
                         payload,
                         PAYLOAD_CONTRACT_SEQUENCE,
@@ -1068,15 +1063,12 @@ async fn send_stable_payload_contract(
         PayloadContractCaseKind::Camera8mpBayerRggb12p => {
             transports
                 .zero_copy
-                .send_uninit_stable_payload_as::<CameraBayerRggb12pFrame8mpV1>(
-                    metadata,
-                    |payload| {
-                        payload_contract::init_camera_8mp_bayer_rggb12p(
-                            payload,
-                            PAYLOAD_CONTRACT_SEQUENCE,
-                        )
-                    },
-                )
+                .send_uninit_stable_payload::<CameraBayerRggb12pFrame8mpV1>(metadata, |payload| {
+                    payload_contract::init_camera_8mp_bayer_rggb12p(
+                        payload,
+                        PAYLOAD_CONTRACT_SEQUENCE,
+                    )
+                })
                 .await
         }
     }

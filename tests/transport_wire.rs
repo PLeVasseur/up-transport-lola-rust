@@ -5,18 +5,21 @@ use std::{future::Future, sync::Arc, task::Wake};
 use async_trait::async_trait;
 use std::sync::Mutex;
 use up_rust::{
-    try_project_umessage_to_frame_metadata, NativePrefixProtobufMetadataCodec, PayloadEncoding,
-    PayloadFormat, ProtobufWire, UCode, UFrameMetadata, UFrameView, UMessageBuilder,
-    UPayloadFormat, UProtocolNativeWire, UTxBuffer, UTxLoanSpec, UUninitTxBuffer, UUri, UWire,
-    UWireRx, UWireTransport, UZeroCopyListener, UZeroCopyTransport, UZeroCopyUninitTransport,
-    WireIdentity, NATIVE_PREFIX_METADATA_LAYOUT_ID,
+    try_project_umessage_to_frame_metadata, PayloadEncoding, PayloadFormat, ProtobufWire, UCode,
+    UFrameMetadata, UFrameView, UMessageBuilder, UNativePrefixWireTransport, UPayloadFormat,
+    UProtocolNativeWire, UTxBuffer, UTxLoanSpec, UUninitTxBuffer, UUri, UWire, UZeroCopyListener,
+    UZeroCopyTransport, UZeroCopyUninitTransport, WireIdentity, NATIVE_PREFIX_METADATA_LAYOUT_ID,
 };
 #[cfg(feature = "benchmark-owned")]
 use up_rust::{UOwnedFrame, UOwnedTransport};
 #[cfg(feature = "benchmark-owned")]
 use up_transport_lola_rust::LolaOwnedCore;
-use up_transport_lola_rust::{LolaRxLease, LolaTransportConfig, UTransportLola};
+use up_transport_lola_rust::{LolaTransportConfig, LolaZeroCopyCore, UTransportLola};
 use up_wire_xcdrv2::{VehicleSignalV1, XcdrV2Wire, VEHICLE_SIGNAL_V1_GOLDEN_VALUE};
+
+type NativeLolaTransport<W> = UNativePrefixWireTransport<LolaZeroCopyCore, W>;
+type NativeLolaRx<W> = <NativeLolaTransport<W> as UZeroCopyTransport>::Rx;
+type NativeLolaNativeRx = NativeLolaRx<UProtocolNativeWire>;
 
 struct NoopWake;
 
@@ -143,14 +146,11 @@ where
     });
 }
 
-fn selected_wire<W>(
-    core: up_transport_lola_rust::LolaZeroCopyCore,
-    wire: W,
-) -> UWireTransport<up_transport_lola_rust::LolaZeroCopyCore, W, NativePrefixProtobufMetadataCodec>
+fn selected_wire<W>(core: LolaZeroCopyCore, wire: W) -> NativeLolaTransport<W>
 where
     W: UWire,
 {
-    UWireTransport::new(core, wire, NativePrefixProtobufMetadataCodec)
+    core.with_selected_wire(wire)
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -195,13 +195,8 @@ impl RecordingListener {
 }
 
 #[async_trait]
-impl UZeroCopyListener<UWireRx<LolaRxLease, UProtocolNativeWire, NativePrefixProtobufMetadataCodec>>
-    for RecordingListener
-{
-    async fn on_receive_zero_copy(
-        &self,
-        frame: UWireRx<LolaRxLease, UProtocolNativeWire, NativePrefixProtobufMetadataCodec>,
-    ) {
+impl UZeroCopyListener<NativeLolaNativeRx> for RecordingListener {
+    async fn on_receive_zero_copy(&self, frame: NativeLolaNativeRx) {
         self.payloads
             .lock()
             .unwrap()
@@ -296,14 +291,7 @@ fn no_payload_and_present_empty_payload_are_distinct() {
     assert_eq!(empty.payload_len(), 0);
 }
 
-fn receive_with_retry<W>(
-    selected: &UWireTransport<
-        up_transport_lola_rust::LolaZeroCopyCore,
-        W,
-        NativePrefixProtobufMetadataCodec,
-    >,
-    topic: &UUri,
-) -> UWireRx<LolaRxLease, W, NativePrefixProtobufMetadataCodec>
+fn receive_with_retry<W>(selected: &NativeLolaTransport<W>, topic: &UUri) -> NativeLolaRx<W>
 where
     W: UWire + Send + Sync + 'static,
 {
@@ -349,11 +337,7 @@ fn listener_receives_and_drops_after_unregister() {
         let selected = selected_wire(transport.zero_copy_core(), UProtocolNativeWire);
         let topic = UUri::try_from("//vehicle/4210/1/9015").expect("valid URI");
         let listener = Arc::new(RecordingListener::default());
-        let registration: Arc<
-            dyn UZeroCopyListener<
-                UWireRx<LolaRxLease, UProtocolNativeWire, NativePrefixProtobufMetadataCodec>,
-            >,
-        > = listener.clone();
+        let registration: Arc<dyn UZeroCopyListener<NativeLolaNativeRx>> = listener.clone();
 
         selected
             .register_zero_copy_listener(&topic, None, Arc::clone(&registration))
@@ -381,11 +365,7 @@ fn listener_drops_wrong_wire_payload() {
         let selected = selected_wire(transport.zero_copy_core(), UProtocolNativeWire);
         let topic = UUri::try_from("//vehicle/4210/1/9027").expect("valid URI");
         let listener = Arc::new(RecordingListener::default());
-        let registration: Arc<
-            dyn UZeroCopyListener<
-                UWireRx<LolaRxLease, UProtocolNativeWire, NativePrefixProtobufMetadataCodec>,
-            >,
-        > = listener.clone();
+        let registration: Arc<dyn UZeroCopyListener<NativeLolaNativeRx>> = listener.clone();
 
         selected
             .register_zero_copy_listener(&topic, None, registration)

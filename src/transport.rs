@@ -13,9 +13,10 @@ use async_trait::async_trait;
 #[cfg(feature = "lola-ffi")]
 use tokio::task::JoinHandle;
 use up_rust::{
-    PreparedTxLoanSpec, UCode, UEncodedZeroCopyListener, UFrameView, UStatus, UUri,
-    UZeroCopyListener, UZeroCopyTransportCore, UZeroCopyTransportImpl,
-    UZeroCopyUninitTransportCore, UZeroCopyUninitTransportImpl, ValidatedTxLoanSpec,
+    PreparedTxLoanSpec, UCode, UEncodedZeroCopyListener, UFrameView, UNativePrefixWireTransport,
+    UStatus, UUri, UWire, UWithNativePrefixWire, UZeroCopyListener, UZeroCopyTransportCore,
+    UZeroCopyTransportImpl, UZeroCopyUninitTransportCore, UZeroCopyUninitTransportImpl,
+    ValidatedTxLoanSpec,
 };
 
 #[cfg(any(feature = "test-stub", feature = "lola-ffi"))]
@@ -408,6 +409,17 @@ fn frame_matches(frame: &LolaRxLease, source_filter: &UUri, sink_filter: Option<
                 .sink()
                 .is_some_and(|sink| filter.matches(sink))
         })
+}
+
+impl LolaZeroCopyCore {
+    /// Wraps this core in the generic selected-wire adapter.
+    #[must_use]
+    pub fn with_selected_wire<W>(self, wire: W) -> UNativePrefixWireTransport<Self, W>
+    where
+        W: UWire,
+    {
+        self.into_native_prefix_wire_transport(wire)
+    }
 }
 
 #[async_trait]

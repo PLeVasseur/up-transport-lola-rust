@@ -16,9 +16,9 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use tokio::sync::Mutex;
 use up_rust::{
-    EncodedOwnedFrame, NativePrefixProtobufMetadataCodec, PreparedOwnedFrame, PreparedTxLoanSpec,
-    UCode, UEncodedOwnedListener, UEncodedRxFrame, UEncodedZeroCopyListener, UOwnedTransportCore,
-    UStatus, UTxBuffer, UUri, UWire, UWireTransport, UZeroCopyTransportCore,
+    EncodedOwnedFrame, PreparedOwnedFrame, PreparedTxLoanSpec, UCode, UEncodedOwnedListener,
+    UEncodedRxFrame, UEncodedZeroCopyListener, UNativePrefixWireTransport, UOwnedTransportCore,
+    UStatus, UTxBuffer, UUri, UWire, UWithNativePrefixWire, UZeroCopyTransportCore,
 };
 
 use crate::{LolaRxLease, LolaZeroCopyCore};
@@ -42,14 +42,11 @@ impl LolaOwnedCore {
 
     /// Wraps this core in the generic selected-wire owned adapter.
     #[must_use]
-    pub fn with_selected_wire<W>(
-        self,
-        wire: W,
-    ) -> UWireTransport<Self, W, NativePrefixProtobufMetadataCodec>
+    pub fn with_selected_wire<W>(self, wire: W) -> UNativePrefixWireTransport<Self, W>
     where
         W: UWire,
     {
-        UWireTransport::new(self, wire, NativePrefixProtobufMetadataCodec)
+        self.into_native_prefix_wire_transport(wire)
     }
 
     /// Returns the wrapped selected-wire zero-copy core.
