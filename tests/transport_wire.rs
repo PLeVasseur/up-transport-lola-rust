@@ -4,11 +4,14 @@ use std::{future::Future, sync::Arc, task::Wake};
 
 use async_trait::async_trait;
 use std::sync::Mutex;
+use up_rust::selected_wire_user_api::UNativePrefixWireTransport;
+use up_rust::wire_implementer_api::{
+    ProtobufWire, UProtocolNativeWire, UWire, WireIdentity, NATIVE_PREFIX_METADATA_LAYOUT_ID,
+};
 use up_rust::{
-    try_project_umessage_to_frame_metadata, PayloadEncoding, PayloadFormat, ProtobufWire, UCode,
-    UFrameMetadata, UFrameView, UMessageBuilder, UNativePrefixWireTransport, UPayloadFormat,
-    UProtocolNativeWire, UTxBuffer, UTxLoanSpec, UUninitTxBuffer, UUri, UWire, UZeroCopyListener,
-    UZeroCopyTransport, UZeroCopyUninitTransport, WireIdentity, NATIVE_PREFIX_METADATA_LAYOUT_ID,
+    try_project_umessage_to_frame_metadata, PayloadEncoding, PayloadFormat, UCode, UFrameMetadata,
+    UFrameView, UMessageBuilder, UPayloadFormat, UTxBuffer, UTxLoanSpec, UUninitTxBuffer, UUri,
+    UZeroCopyListener, UZeroCopyTransport, UZeroCopyUninitTransport,
 };
 #[cfg(feature = "benchmark-owned")]
 use up_rust::{UOwnedFrame, UOwnedTransport};

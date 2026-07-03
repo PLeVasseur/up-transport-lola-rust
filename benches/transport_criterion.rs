@@ -22,14 +22,17 @@ use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criteri
 use tokio::runtime::{Builder, Runtime};
 #[cfg(feature = "payload-contract-benchmarks")]
 use up_rust::bench_fixtures::payload_contract::{self, *};
+use up_rust::selected_wire_user_api::{
+    ProtobufWireTransport, StableContainerWireTransport, UWithNativePrefixWire,
+};
 #[cfg(feature = "benchmark-owned")]
-use up_rust::ProtobufWire;
+use up_rust::wire_implementer_api::ProtobufWire;
+use up_rust::wire_implementer_api::{
+    NativePrefixProtobufMetadataCodec, StableContainerWireFormat, UWire, UWireMetadataCodec,
+};
 use up_rust::{
-    NativePrefixProtobufMetadataCodec, PayloadEncoding, ProtobufWireTransport,
-    StableContainerWireFormat, StableContainerWireTransport, UCode, UFrameMetadata,
-    ULoanedContiguousZeroCopyRxFrame, UMessageBuilder, UMessageType, UUri, UWire,
-    UWireMetadataCodec, UWithNativePrefixWire, UZeroCopyTransport, UZeroCopyUninitTransportExt,
-    UUID,
+    PayloadEncoding, UCode, UFrameMetadata, ULoanedContiguousZeroCopyRxFrame, UMessageBuilder,
+    UMessageType, UUri, UZeroCopyTransport, UZeroCopyUninitTransportExt, UUID,
 };
 #[cfg(all(feature = "payload-contract-benchmarks", feature = "benchmark-owned"))]
 use up_rust::{ProtobufPayload, UOwnedFrame, UOwnedTransport};

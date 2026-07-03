@@ -10,12 +10,13 @@
 use std::sync::Arc;
 use std::{io::Cursor, mem::MaybeUninit};
 
+use up_rust::transport_implementer_api::{UEncodedLoanedRxFrame, UEncodedRxFrame};
 #[cfg(test)]
 use up_rust::{try_project_umessage_to_frame_metadata, UMessageBuilder, UPayloadFormat, UUri};
 use up_rust::{
-    LoanedPayload, PayloadLoanProvenance, UCode, UEncodedLoanedRxFrame, UEncodedRxFrame,
-    UFrameMetadata, UFrameView, ULoanedContiguousZeroCopyRxFrame, UStatus, UTxBuffer,
-    UUninitTxBuffer, UWireError, UZeroCopyRxLease,
+    LoanedPayload, PayloadLoanProvenance, UCode, UFrameMetadata, UFrameView,
+    ULoanedContiguousZeroCopyRxFrame, UStatus, UTxBuffer, UUninitTxBuffer, UWireError,
+    UZeroCopyRxLease,
 };
 
 #[cfg(feature = "lola-ffi")]

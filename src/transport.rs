@@ -12,11 +12,15 @@ use std::{sync::Weak, time::Duration};
 use async_trait::async_trait;
 #[cfg(feature = "lola-ffi")]
 use tokio::task::JoinHandle;
+use up_rust::selected_wire_user_api::{UNativePrefixWireTransport, UWithNativePrefixWire};
+use up_rust::transport_implementer_api::{
+    PreparedTxLoanSpec, UEncodedZeroCopyListener, UZeroCopyTransportCore,
+    UZeroCopyUninitTransportCore,
+};
+use up_rust::wire_implementer_api::UWire;
 use up_rust::{
-    PreparedTxLoanSpec, UCode, UEncodedZeroCopyListener, UFrameView, UNativePrefixWireTransport,
-    UStatus, UUri, UWire, UWithNativePrefixWire, UZeroCopyListener, UZeroCopyTransportCore,
-    UZeroCopyTransportImpl, UZeroCopyUninitTransportCore, UZeroCopyUninitTransportImpl,
-    ValidatedTxLoanSpec,
+    UCode, UFrameView, UStatus, UUri, UZeroCopyListener, UZeroCopyTransportImpl,
+    UZeroCopyUninitTransportImpl, ValidatedTxLoanSpec,
 };
 
 #[cfg(any(feature = "test-stub", feature = "lola-ffi"))]
