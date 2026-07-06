@@ -28,11 +28,11 @@ use up_rust::selected_wire_user_api::{
 #[cfg(feature = "benchmark-owned")]
 use up_rust::wire_implementer_api::ProtobufWire;
 use up_rust::wire_implementer_api::{
-    NativePrefixProtobufMetadataCodec, StableContainerWireFormat, UWire, UWireMetadataCodec,
+    NativePrefixFrameMetadataCodec, StableContainerWireFormat, UWire, UWireMetadataCodec,
 };
 use up_rust::{
-    PayloadEncoding, UCode, UFrameMetadata, ULoanedContiguousZeroCopyRxFrame, UMessageBuilder,
-    UMessageType, UUri, UZeroCopyTransport, UZeroCopyUninitTransportExt, UUID,
+    PayloadEncoding, UCode, UFrameMetadata, ULoanedContiguousZeroCopyRxFrame, UMessageType, UUri,
+    UZeroCopyTransport, UZeroCopyUninitTransportExt, UUID,
 };
 #[cfg(all(feature = "payload-contract-benchmarks", feature = "benchmark-owned"))]
 use up_rust::{ProtobufPayload, UOwnedFrame, UOwnedTransport};
@@ -356,10 +356,11 @@ impl BenchCase {
     }
 
     fn metadata(&self, id: UUID, encoding: Option<PayloadEncoding>) -> UFrameMetadata {
-        let mut builder = UMessageBuilder::publish(self.source.clone());
-        builder.with_message_id(id);
-        let message = builder.build().expect("valid benchmark message");
-        UFrameMetadata::new(message.attributes().clone(), encoding).expect("valid metadata")
+        let mut builder = UFrameMetadata::publish(self.source.clone()).with_id(id);
+        if let Some(encoding) = encoding {
+            builder = builder.with_payload_encoding(encoding);
+        }
+        builder.build().expect("valid metadata")
     }
 }
 
@@ -736,16 +737,16 @@ fn emit_p51_lola_sample(sample: P51LolaSample<'_>) {
 fn encoded_metadata_len(path: PayloadContractPath, metadata: &UFrameMetadata) -> usize {
     match path {
         #[cfg(feature = "benchmark-owned")]
-        PayloadContractPath::ProtobufOwned => NativePrefixProtobufMetadataCodec
+        PayloadContractPath::ProtobufOwned => NativePrefixFrameMetadataCodec
             .encode_frame_metadata(ProtobufWire::metadata_context(), metadata)
             .expect("protobuf selected-wire metadata should encode")
             .len(),
-        PayloadContractPath::StableZcNoZero => NativePrefixProtobufMetadataCodec
+        PayloadContractPath::StableZcNoZero => NativePrefixFrameMetadataCodec
             .encode_frame_metadata(StableContainerWireFormat::metadata_context(), metadata)
             .expect("stable selected-wire metadata should encode")
             .len(),
         #[cfg(feature = "benchmark-owned")]
-        PayloadContractPath::StableOwnedBytes => NativePrefixProtobufMetadataCodec
+        PayloadContractPath::StableOwnedBytes => NativePrefixFrameMetadataCodec
             .encode_frame_metadata(StableContainerWireFormat::metadata_context(), metadata)
             .expect("stable selected-wire metadata should encode")
             .len(),
@@ -1153,8 +1154,8 @@ fn protobuf_payload_contract_ack(
     contract: &PayloadContractCase,
 ) -> PayloadContractAck {
     let transported_payload_len = frame.payload_bytes().len();
-    let id = frame.metadata().attributes().id().clone();
-    let message_type = frame.metadata().attributes().type_();
+    let id = frame.metadata().id().clone();
+    let message_type = frame.metadata().kind().to_legacy_type();
     payload_contract::validate_protobuf_bytes(
         contract,
         PAYLOAD_CONTRACT_SEQUENCE,
@@ -1184,8 +1185,8 @@ fn stable_owned_payload_contract_ack(
     )
     .expect("stable owned payload-contract frame should validate");
     PayloadContractAck {
-        id: frame.metadata().attributes().id().clone(),
-        message_type: frame.metadata().attributes().type_(),
+        id: frame.metadata().id().clone(),
+        message_type: frame.metadata().kind().to_legacy_type(),
         case_id: contract.case_id(),
         sequence: PAYLOAD_CONTRACT_SEQUENCE,
         semantic_reference_len: contract.semantic_reference_len(),
@@ -1205,8 +1206,8 @@ fn stable_payload_contract_ack(
     );
     validate_stable_payload_for_case(frame, contract);
     PayloadContractAck {
-        id: frame.metadata().attributes().id().clone(),
-        message_type: frame.metadata().attributes().type_(),
+        id: frame.metadata().id().clone(),
+        message_type: frame.metadata().kind().to_legacy_type(),
         case_id: contract.case_id(),
         sequence: PAYLOAD_CONTRACT_SEQUENCE,
         semantic_reference_len: contract.semantic_reference_len(),

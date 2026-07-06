@@ -9,9 +9,8 @@ use up_rust::wire_implementer_api::{
     ProtobufWire, UProtocolNativeWire, UWire, WireIdentity, NATIVE_PREFIX_METADATA_LAYOUT_ID,
 };
 use up_rust::{
-    try_project_umessage_to_frame_metadata, PayloadEncoding, PayloadFormat, UCode, UFrameMetadata,
-    UFrameView, UMessageBuilder, UPayloadFormat, UTxBuffer, UTxLoanSpec, UUninitTxBuffer, UUri,
-    UZeroCopyListener, UZeroCopyTransport, UZeroCopyUninitTransport,
+    PayloadEncoding, PayloadFormat, UCode, UFrameMetadata, UFrameView, UTxBuffer, UTxLoanSpec,
+    UUninitTxBuffer, UUri, UZeroCopyListener, UZeroCopyTransport, UZeroCopyUninitTransport,
 };
 #[cfg(feature = "benchmark-owned")]
 use up_rust::{UOwnedFrame, UOwnedTransport};
@@ -80,10 +79,10 @@ fn runtime() -> tokio::runtime::Runtime {
 }
 
 fn metadata_with_encoding(topic: UUri, encoding: PayloadEncoding) -> UFrameMetadata {
-    let message = UMessageBuilder::publish(topic)
+    UFrameMetadata::publish(topic)
+        .with_payload_encoding(encoding)
         .build()
-        .expect("valid publish message");
-    UFrameMetadata::new(message.attributes().clone(), Some(encoding)).expect("valid frame metadata")
+        .expect("valid frame metadata")
 }
 
 fn payload_tx_spec_for<W>(topic: UUri, payload_len: usize, payload_alignment: usize) -> UTxLoanSpec
@@ -99,10 +98,10 @@ where
 }
 
 fn native_tx_spec(topic: UUri, payload_len: usize, payload_alignment: usize) -> UTxLoanSpec {
-    let message = UMessageBuilder::publish(topic)
-        .build_with_payload(Vec::new(), UPayloadFormat::Raw)
-        .expect("valid publish message");
-    let metadata = try_project_umessage_to_frame_metadata(&message).expect("valid metadata");
+    let metadata = UFrameMetadata::publish(topic)
+        .with_payload_encoding(PayloadEncoding::RAW)
+        .build()
+        .expect("valid metadata");
     UTxLoanSpec::payload(metadata, payload_len, payload_alignment).expect("valid loan spec")
 }
 
@@ -267,21 +266,16 @@ fn no_payload_and_present_empty_payload_are_distinct() {
     let no_payload_topic = UUri::try_from("//vehicle/4210/1/9025").expect("valid URI");
     let empty_topic = UUri::try_from("//vehicle/4210/1/9026").expect("valid URI");
     let selected = selected_wire(transport.zero_copy_core(), UProtocolNativeWire);
-    let no_payload_message = UMessageBuilder::publish(no_payload_topic.clone())
+    let no_payload_metadata = UFrameMetadata::publish(no_payload_topic.clone())
         .build()
         .unwrap();
-    let no_payload_metadata =
-        UFrameMetadata::new(no_payload_message.attributes().clone(), None).unwrap();
     let no_payload_loan =
         block_on_ready(selected.loan_tx(UTxLoanSpec::no_payload(no_payload_metadata).unwrap()))
             .unwrap();
     block_on_ready(selected.send_zero_copy(no_payload_loan)).unwrap();
     let no_payload = receive_with_retry(&selected, &no_payload_topic);
 
-    let empty_metadata = metadata_with_encoding(
-        empty_topic.clone(),
-        PayloadEncoding::Standard(UPayloadFormat::Raw),
-    );
+    let empty_metadata = metadata_with_encoding(empty_topic.clone(), PayloadEncoding::RAW);
     let empty_loan = block_on_ready(
         selected.loan_tx(UTxLoanSpec::present_empty_payload(empty_metadata).unwrap()),
     )

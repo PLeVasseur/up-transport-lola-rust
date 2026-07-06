@@ -19,7 +19,7 @@ use up_rust::transport_implementer_api::{
 };
 use up_rust::wire_implementer_api::UWire;
 use up_rust::{
-    UCode, UFrameMetadata, UFrameView, UMessageType, UStatus, UUri, UZeroCopyListener,
+    FrameMessageKind, UCode, UFrameMetadata, UFrameView, UStatus, UUri, UZeroCopyListener,
     UZeroCopyTransportImpl, UZeroCopyUninitTransportImpl, ValidatedTxLoanSpec,
 };
 
@@ -236,8 +236,7 @@ impl UTransportLola {
     }
 
     fn tx_channel_for_metadata(&self, metadata: &UFrameMetadata) -> LolaTxChannel {
-        if self.response_config.is_some() && metadata.attributes().type_() == UMessageType::Response
-        {
+        if self.response_config.is_some() && metadata.kind() == FrameMessageKind::Response {
             LolaTxChannel::Response
         } else {
             LolaTxChannel::Primary
@@ -694,11 +693,10 @@ impl LolaRxChannels {
 }
 
 fn frame_matches(frame: &LolaRxLease, source_filter: &UUri, sink_filter: Option<&UUri>) -> bool {
-    source_filter.matches(frame.metadata().attributes().source())
+    source_filter.matches(frame.metadata().source())
         && sink_filter.is_none_or(|filter| {
             frame
                 .metadata()
-                .attributes()
                 .sink()
                 .is_some_and(|sink| filter.matches(sink))
         })

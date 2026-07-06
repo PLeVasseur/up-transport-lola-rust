@@ -11,13 +11,13 @@ use std::sync::Arc;
 use std::{io::Cursor, mem::MaybeUninit};
 
 use up_rust::transport_implementer_api::{UEncodedLoanedRxFrame, UEncodedRxFrame};
-#[cfg(test)]
-use up_rust::{try_project_umessage_to_frame_metadata, UMessageBuilder, UPayloadFormat, UUri};
 use up_rust::{
     LoanedPayload, PayloadLoanProvenance, UCode, UFrameMetadata, UFrameView,
     ULoanedContiguousZeroCopyRxFrame, UStatus, UTxBuffer, UUninitTxBuffer, UWireError,
     UZeroCopyRxLease,
 };
+#[cfg(test)]
+use up_rust::{PayloadEncoding, UUri};
 
 #[cfg(feature = "lola-ffi")]
 use crate::sys::{NativeRxSample, NativeTxLoan};
@@ -753,19 +753,18 @@ fn initialized_prefix_mut(
 
 fn unavailable_metadata() -> UFrameMetadata {
     let topic = up_rust::UUri::try_from("//vehicle/4210/1/9fff").expect("valid fallback URI");
-    let message = up_rust::UMessageBuilder::publish(topic)
+    UFrameMetadata::publish(topic)
         .build()
-        .expect("valid fallback message");
-    up_rust::try_project_umessage_to_frame_metadata(&message).expect("valid fallback metadata")
+        .expect("valid fallback metadata")
 }
 
 #[cfg(test)]
 fn deterministic_raw_metadata() -> UFrameMetadata {
     let topic = UUri::try_from("//vehicle/4210/1/9008").expect("valid test URI");
-    let message = UMessageBuilder::publish(topic)
-        .build_with_payload(Vec::new(), UPayloadFormat::Raw)
-        .expect("valid publish message");
-    try_project_umessage_to_frame_metadata(&message).expect("valid frame metadata")
+    UFrameMetadata::publish(topic)
+        .with_payload_encoding(PayloadEncoding::RAW)
+        .build()
+        .expect("valid frame metadata")
 }
 
 #[cfg(test)]
