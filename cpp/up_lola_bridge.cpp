@@ -196,15 +196,21 @@ UpLolaStatusCode initialize_runtime_once(const std::string& config_path)
 
     static std::mutex runtime_mutex;
     static bool initialized{false};
+    static std::optional<std::string> initialized_config_path{};
     std::lock_guard<std::mutex> lock{runtime_mutex};
     if (initialized)
     {
+        if (initialized_config_path.has_value() && initialized_config_path.value() != config_path)
+        {
+            return UP_LOLA_STATUS_INVALID_ARGUMENT;
+        }
         return UP_LOLA_STATUS_OK;
     }
 
     configure_logging(config_path);
     score::mw::com::runtime::RuntimeConfiguration runtime_configuration{config_path.c_str()};
     score::mw::com::runtime::InitializeRuntime(runtime_configuration);
+    initialized_config_path = config_path;
     initialized = true;
     return UP_LOLA_STATUS_OK;
 }
@@ -458,13 +464,30 @@ struct UpLolaTransport
 
     ~UpLolaTransport()
     {
+        if (proxy_event != nullptr && subscribed)
+        {
+            proxy_event->Unsubscribe();
+        }
+        subscribed = false;
+        proxy_event = nullptr;
+        proxy.reset();
+
+        if (skeleton.has_value())
+        {
+            skeleton->StopOfferService();
+        }
+        skeleton_event = nullptr;
+        skeleton.reset();
+
         if (tx_pool != nullptr)
         {
             tx_pool->release_ref();
+            tx_pool = nullptr;
         }
         if (rx_pool != nullptr)
         {
             rx_pool->release_ref();
+            rx_pool = nullptr;
         }
     }
 
@@ -536,9 +559,18 @@ struct UpLolaSubscriber
 
     ~UpLolaSubscriber()
     {
+        if (proxy_event != nullptr && subscribed)
+        {
+            proxy_event->Unsubscribe();
+        }
+        subscribed = false;
+        proxy_event = nullptr;
+        proxy.reset();
+
         if (rx_pool != nullptr)
         {
             rx_pool->release_ref();
+            rx_pool = nullptr;
         }
     }
 
@@ -668,18 +700,6 @@ UpLolaStatusCode up_lola_transport_create(const UpLolaConfig* config, UpLolaTran
 
 void up_lola_transport_destroy(UpLolaTransport* transport)
 {
-    if (transport == nullptr)
-    {
-        return;
-    }
-    if (transport->proxy_event != nullptr && transport->subscribed)
-    {
-        transport->proxy_event->Unsubscribe();
-    }
-    if (transport->skeleton.has_value())
-    {
-        transport->skeleton->StopOfferService();
-    }
     delete transport;
 }
 
@@ -854,14 +874,6 @@ UpLolaStatusCode up_lola_subscriber_create(const UpLolaConfig* config, UpLolaSub
 
 void up_lola_subscriber_destroy(UpLolaSubscriber* subscriber)
 {
-    if (subscriber == nullptr)
-    {
-        return;
-    }
-    if (subscriber->proxy_event != nullptr && subscriber->subscribed)
-    {
-        subscriber->proxy_event->Unsubscribe();
-    }
     delete subscriber;
 }
 

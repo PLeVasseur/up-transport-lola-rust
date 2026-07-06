@@ -25,6 +25,26 @@ Test-stub validation can support compile/proof work, but native performance
 claims require the real LoLa runtime path and recorded `LOLA_BENCH_*` benchmark
 environment.
 
+## Native LoLa Deployment Manifests
+
+Native LoLa is deployment-manifest driven. `LolaTransportConfig` points at an
+S-CORE `mw_com_config.json` manifest with `mw_com_config_path`; that manifest
+defines the LoLa service types, service IDs, instance IDs, event IDs, sample
+slots, and subscriber limits used by the native bridge.
+
+The S-CORE runtime is initialized once per process. All native LoLa transports
+and subscribers in that process must use the same MW COM manifest path, or omit
+the path and rely on S-CORE's default `./etc/mw_com_config.json`. The Rust and
+native bridge layers reject a second different manifest path in the same
+process because S-CORE would otherwise keep using the first initialized runtime
+configuration.
+
+On Linux, S-CORE LoLa stores runtime service-discovery and partial-restart state
+under `/tmp/mw_com_lola`. Those files are runtime state, not uProtocol route
+configuration. Stale files can affect repeated local runs after crashes. Stop
+all LoLa-backed processes before cleaning that directory; do not remove it while
+a native LoLa process is still running.
+
 ## Benchmark Backends
 
 The benchmark script defaults to the native backend and resolves Bazel in this

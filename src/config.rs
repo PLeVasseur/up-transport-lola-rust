@@ -15,6 +15,18 @@ pub enum LolaPullMismatchQueueFullPolicy {
     RejectNewestAndReport,
 }
 
+/// LoLa channel used when selected-wire routing intentionally registers a broad
+/// physical listener before metadata decode can distinguish request/response.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum LolaDefaultRxChannel {
+    /// Primary LoLa event, used by default for request-oriented endpoints.
+    Primary,
+    /// RPC response LoLa event, used by response-oriented bridge endpoints.
+    Response,
+    /// Both primary and response events.
+    Both,
+}
+
 /// Configuration for a LoLa transport instance.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LolaTransportConfig {
@@ -36,7 +48,15 @@ pub struct LolaTransportConfig {
     pub pull_mismatch_queue_capacity: usize,
     /// Policy applied when the pull mismatch queue is full.
     pub pull_mismatch_queue_full_policy: LolaPullMismatchQueueFullPolicy,
-    /// Optional path to the S-CORE `mw_com_config.json` file.
+    /// Optional path to the S-CORE `mw_com_config.json` deployment manifest.
+    ///
+    /// The native S-CORE runtime is initialized once per process. All native
+    /// LoLa transports and subscribers in that process must therefore use the
+    /// same manifest path, or omit the path and rely on S-CORE's default
+    /// `./etc/mw_com_config.json`. The manifest defines the LoLa service IDs,
+    /// instance IDs, events, sample slots, and subscriber limits; Linux service
+    /// discovery and partial-restart state remains under S-CORE's runtime
+    /// directory such as `/tmp/mw_com_lola`.
     pub mw_com_config_path: Option<String>,
 }
 

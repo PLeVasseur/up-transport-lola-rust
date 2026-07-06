@@ -34,6 +34,7 @@ pub struct LolaTxLoan {
     metadata: UFrameMetadata,
     encoded_metadata: Vec<u8>,
     sample: LolaTxStorage,
+    channel: LolaTxChannel,
     payload_offset: usize,
     payload_len: usize,
 }
@@ -43,8 +44,18 @@ pub struct LolaUninitTxLoan {
     metadata: UFrameMetadata,
     encoded_metadata: Vec<u8>,
     sample: LolaUninitTxStorage,
+    channel: LolaTxChannel,
     payload_offset: usize,
     payload_len: usize,
+}
+
+/// Internal LoLa event channel that owns a TX loan.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum LolaTxChannel {
+    /// Primary LoLa event, used for non-RPC frames and RPC requests.
+    Primary,
+    /// Optional response LoLa event, used for RPC responses.
+    Response,
 }
 
 enum LolaTxStorage {
@@ -116,6 +127,7 @@ impl LolaTxLoan {
         sample_size: usize,
         payload_len: usize,
         payload_alignment: usize,
+        channel: LolaTxChannel,
     ) -> Result<Self, UStatus> {
         let mut sample = vec![0_u8; sample_size];
         let payload_offset = write_frame_header(
@@ -128,6 +140,7 @@ impl LolaTxLoan {
             metadata,
             encoded_metadata,
             sample: LolaTxStorage::Vec(sample),
+            channel,
             payload_offset,
             payload_len,
         })
@@ -140,6 +153,7 @@ impl LolaTxLoan {
         mut sample: NativeTxLoan,
         payload_len: usize,
         payload_alignment: usize,
+        channel: LolaTxChannel,
     ) -> Result<Self, UStatus> {
         let sample_len = sample.len();
         initialize_uninit_range(sample.as_uninit_slice(), 0, sample_len)?;
@@ -153,6 +167,7 @@ impl LolaTxLoan {
             metadata,
             encoded_metadata,
             sample: LolaTxStorage::Native(sample),
+            channel,
             payload_offset,
             payload_len,
         })
@@ -177,15 +192,16 @@ impl LolaTxLoan {
     }
 
     #[cfg(feature = "lola-ffi")]
-    pub(crate) fn into_native(self) -> Result<NativeTxLoan, UStatus> {
+    pub(crate) fn into_native(self) -> Result<(LolaTxChannel, NativeTxLoan), UStatus> {
         if self.sample.as_slice().get(..4) != Some(LOLA_FRAME_MAGIC.as_slice()) {
             return Err(UStatus::fail_with_code(
                 UCode::Internal,
                 "LoLa TX frame header was not written before send",
             ));
         }
+        let channel = self.channel;
         match self.sample {
-            LolaTxStorage::Native(sample) => Ok(sample),
+            LolaTxStorage::Native(sample) => Ok((channel, sample)),
         }
     }
 }
@@ -198,6 +214,7 @@ impl LolaUninitTxLoan {
         sample_size: usize,
         payload_len: usize,
         payload_alignment: usize,
+        channel: LolaTxChannel,
     ) -> Result<Self, UStatus> {
         let mut sample = vec![MaybeUninit::uninit(); sample_size];
         let payload_offset = write_frame_header_uninit(
@@ -210,6 +227,7 @@ impl LolaUninitTxLoan {
             metadata,
             encoded_metadata,
             sample: LolaUninitTxStorage::Vec(sample),
+            channel,
             payload_offset,
             payload_len,
         })
@@ -222,6 +240,7 @@ impl LolaUninitTxLoan {
         mut sample: NativeTxLoan,
         payload_len: usize,
         payload_alignment: usize,
+        channel: LolaTxChannel,
     ) -> Result<Self, UStatus> {
         let payload_offset = write_frame_header_uninit(
             &encoded_metadata,
@@ -233,6 +252,7 @@ impl LolaUninitTxLoan {
             metadata,
             encoded_metadata,
             sample: LolaUninitTxStorage::Native(sample),
+            channel,
             payload_offset,
             payload_len,
         })
@@ -311,6 +331,7 @@ impl UUninitTxBuffer for LolaUninitTxLoan {
             metadata: self.metadata,
             encoded_metadata: self.encoded_metadata,
             sample,
+            channel: self.channel,
             payload_offset: self.payload_offset,
             payload_len: self.payload_len,
         }
@@ -792,7 +813,15 @@ mod tests {
     fn test_stub_frame_hides_header_and_reports_opaque_provenance() {
         let metadata = deterministic_raw_metadata();
         let encoded_metadata = b"prepared-metadata".to_vec();
-        let mut loan = LolaTxLoan::new_vec(metadata, encoded_metadata.clone(), 256, 3, 8).unwrap();
+        let mut loan = LolaTxLoan::new_vec(
+            metadata,
+            encoded_metadata.clone(),
+            256,
+            3,
+            8,
+            LolaTxChannel::Primary,
+        )
+        .unwrap();
         loan.payload_mut().copy_from_slice(b"abc");
 
         let sample = loan.into_vec();
@@ -818,8 +847,15 @@ mod tests {
     #[test]
     fn test_stub_uninit_tx_loan_commits_after_payload_initialization() {
         let metadata = deterministic_raw_metadata();
-        let mut loan =
-            LolaUninitTxLoan::new_vec(metadata, b"prepared-metadata".to_vec(), 256, 3, 4).unwrap();
+        let mut loan = LolaUninitTxLoan::new_vec(
+            metadata,
+            b"prepared-metadata".to_vec(),
+            256,
+            3,
+            4,
+            LolaTxChannel::Primary,
+        )
+        .unwrap();
         for (slot, byte) in loan.payload_uninit_mut().iter_mut().zip(*b"xyz") {
             slot.write(byte);
         }

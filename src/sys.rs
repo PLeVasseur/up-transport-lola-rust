@@ -6,11 +6,13 @@
  * SPDX-License-Identifier: Apache-2.0
  ********************************************************************************/
 
-use std::{mem::MaybeUninit, ptr::NonNull, slice};
+use std::{mem::MaybeUninit, ptr::NonNull, slice, sync::Mutex};
 
 use up_rust::{UCode, UStatus};
 
 use crate::config::LolaTransportConfig;
+
+static RUNTIME_CONFIG_PATH: Mutex<Option<String>> = Mutex::new(None);
 
 #[repr(C)]
 struct UpLolaStr {
@@ -138,6 +140,7 @@ unsafe impl Sync for NativeTransport {}
 
 impl NativeTransport {
     pub(crate) fn new(config: &LolaTransportConfig) -> Result<Self, UStatus> {
+        register_runtime_config_path(config)?;
         let ffi_config = UpLolaConfig::new(config);
         let mut out = std::ptr::null_mut();
         // SAFETY: `ffi_config` and `out` are valid for the call; the bridge
@@ -193,6 +196,7 @@ unsafe impl Sync for NativeSubscriber {}
 
 impl NativeSubscriber {
     pub(crate) fn new(config: &LolaTransportConfig) -> Result<Self, UStatus> {
+        register_runtime_config_path(config)?;
         let ffi_config = UpLolaConfig::new(config);
         let mut out = std::ptr::null_mut();
         // SAFETY: `ffi_config` and `out` are valid for the call.
@@ -216,6 +220,40 @@ impl NativeSubscriber {
         map_status(status, "receive LoLa sample")?;
         NativeRxSample::new(out, self.sample_size, self.sample_alignment)
     }
+}
+
+fn register_runtime_config_path(config: &LolaTransportConfig) -> Result<(), UStatus> {
+    let Some(path) = config
+        .mw_com_config_path
+        .as_deref()
+        .filter(|path| !path.is_empty())
+    else {
+        return Ok(());
+    };
+    let normalized_path = normalize_runtime_config_path(path);
+    let mut active_path = RUNTIME_CONFIG_PATH.lock().map_err(|_| {
+        UStatus::fail_with_code(UCode::Internal, "LoLa runtime config path lock poisoned")
+    })?;
+    if let Some(existing_path) = active_path.as_deref() {
+        if existing_path != normalized_path {
+            return Err(UStatus::fail_with_code(
+                UCode::InvalidArgument,
+                format!(
+                    "LoLa native runtime was already initialized with MW COM config {existing_path}; cannot also use {normalized_path} in the same process"
+                ),
+            ));
+        }
+        return Ok(());
+    }
+
+    *active_path = Some(normalized_path);
+    Ok(())
+}
+
+fn normalize_runtime_config_path(path: &str) -> String {
+    std::fs::canonicalize(path)
+        .map(|path| path.to_string_lossy().into_owned())
+        .unwrap_or_else(|_| path.to_string())
 }
 
 impl Drop for NativeSubscriber {

@@ -19,8 +19,8 @@ use up_rust::transport_implementer_api::{
 };
 use up_rust::wire_implementer_api::UWire;
 use up_rust::{
-    UCode, UFrameView, UStatus, UUri, UZeroCopyListener, UZeroCopyTransportImpl,
-    UZeroCopyUninitTransportImpl, ValidatedTxLoanSpec,
+    UCode, UFrameMetadata, UFrameView, UMessageType, UStatus, UUri, UZeroCopyListener,
+    UZeroCopyTransportImpl, UZeroCopyUninitTransportImpl, ValidatedTxLoanSpec,
 };
 
 #[cfg(any(feature = "test-stub", feature = "lola-ffi"))]
@@ -28,8 +28,8 @@ use crate::config::LolaPullMismatchQueueFullPolicy;
 #[cfg(feature = "lola-ffi")]
 use crate::sys::{NativeSubscriber, NativeTransport};
 use crate::{
-    config::LolaTransportConfig,
-    frame::{LolaRxLease, LolaTxLoan, LolaUninitTxLoan},
+    config::{LolaDefaultRxChannel, LolaTransportConfig},
+    frame::{LolaRxLease, LolaTxChannel, LolaTxLoan, LolaUninitTxLoan},
 };
 
 /// Zero-copy uProtocol transport backed by a LoLa generic event.
@@ -39,6 +39,8 @@ use crate::{
 /// leases keep the sample alive until callers drop the lease.
 pub struct UTransportLola {
     config: LolaTransportConfig,
+    response_config: Option<LolaTransportConfig>,
+    default_rx_channel: LolaDefaultRxChannel,
     #[cfg(feature = "lola-ffi")]
     self_ref: Weak<UTransportLola>,
     #[cfg(feature = "test-stub")]
@@ -48,11 +50,17 @@ pub struct UTransportLola {
     #[cfg(feature = "lola-ffi")]
     listener_task: Mutex<Option<JoinHandle<()>>>,
     #[cfg(feature = "lola-ffi")]
-    native: NativeTransport,
+    native: Mutex<Option<NativeTransport>>,
+    #[cfg(feature = "lola-ffi")]
+    response_native: Mutex<Option<NativeTransport>>,
     #[cfg(feature = "lola-ffi")]
     subscriber: Mutex<Option<NativeSubscriber>>,
     #[cfg(feature = "lola-ffi")]
+    response_subscriber: Mutex<Option<NativeSubscriber>>,
+    #[cfg(feature = "lola-ffi")]
     listener_subscriber: Mutex<Option<NativeSubscriber>>,
+    #[cfg(feature = "lola-ffi")]
+    response_listener_subscriber: Mutex<Option<NativeSubscriber>>,
 }
 
 /// Selected-wire zero-copy core for LoLa native-frame transport operations.
@@ -69,11 +77,40 @@ impl UTransportLola {
     /// Returns validation errors from [`LolaTransportConfig::validate`] or native
     /// bridge initialization errors when the `lola-ffi` feature is active.
     pub fn build(config: LolaTransportConfig) -> Result<Arc<Self>, UStatus> {
-        config.validate()?;
-        #[cfg(feature = "lola-ffi")]
-        let native = NativeTransport::new(&config)?;
-        Ok(Arc::new_cyclic(|_self_ref| Self {
+        Self::build_with_response_channel(config, None)
+    }
+
+    /// Builds a LoLa transport with an optional RPC response event channel.
+    ///
+    /// The returned value is still one uProtocol transport endpoint. The primary
+    /// LoLa event carries non-RPC frames and RPC requests; the optional response
+    /// event carries RPC responses for LoLa deployments that model request and
+    /// response as separate generic events.
+    pub fn build_with_response_channel(
+        config: LolaTransportConfig,
+        response_config: Option<LolaTransportConfig>,
+    ) -> Result<Arc<Self>, UStatus> {
+        Self::build_with_response_channel_and_default_rx(
             config,
+            response_config,
+            LolaDefaultRxChannel::Primary,
+        )
+    }
+
+    /// Builds a LoLa transport with explicit broad-listener receive-channel preference.
+    pub fn build_with_response_channel_and_default_rx(
+        config: LolaTransportConfig,
+        response_config: Option<LolaTransportConfig>,
+        default_rx_channel: LolaDefaultRxChannel,
+    ) -> Result<Arc<Self>, UStatus> {
+        config.validate()?;
+        if let Some(response_config) = &response_config {
+            response_config.validate()?;
+        }
+        let transport = Arc::new_cyclic(|_self_ref| Self {
+            config,
+            response_config,
+            default_rx_channel,
             #[cfg(feature = "lola-ffi")]
             self_ref: _self_ref.clone(),
             #[cfg(feature = "test-stub")]
@@ -83,12 +120,21 @@ impl UTransportLola {
             #[cfg(feature = "lola-ffi")]
             listener_task: Mutex::new(None),
             #[cfg(feature = "lola-ffi")]
-            native,
+            native: Mutex::new(None),
+            #[cfg(feature = "lola-ffi")]
+            response_native: Mutex::new(None),
             #[cfg(feature = "lola-ffi")]
             subscriber: Mutex::new(None),
             #[cfg(feature = "lola-ffi")]
+            response_subscriber: Mutex::new(None),
+            #[cfg(feature = "lola-ffi")]
             listener_subscriber: Mutex::new(None),
-        }))
+            #[cfg(feature = "lola-ffi")]
+            response_listener_subscriber: Mutex::new(None),
+        });
+        #[cfg(feature = "lola-ffi")]
+        transport.initialize_rpc_egress_channel()?;
+        Ok(transport)
     }
 
     /// Returns the configuration used to build this transport.
@@ -114,6 +160,142 @@ impl UTransportLola {
     }
 
     #[cfg(feature = "lola-ffi")]
+    fn loan_native_sample(
+        &self,
+        channel: LolaTxChannel,
+    ) -> Result<crate::sys::NativeTxLoan, UStatus> {
+        self.ensure_native_producer(channel)?;
+        let native = self.native_for_channel(channel);
+        native
+            .as_ref()
+            .expect("LoLa native transport should be initialized")
+            .loan_sample()
+    }
+
+    #[cfg(feature = "lola-ffi")]
+    fn ensure_native_producer(&self, channel: LolaTxChannel) -> Result<(), UStatus> {
+        let config = self.channel_config(channel);
+        let mut native = self.native_for_channel(channel);
+        if native.is_none() {
+            *native = Some(NativeTransport::new(config)?);
+        }
+        Ok(())
+    }
+
+    #[cfg(feature = "lola-ffi")]
+    fn initialize_rpc_egress_channel(&self) -> Result<(), UStatus> {
+        if self.response_config.is_none() {
+            return Ok(());
+        }
+        match self.default_rx_channel {
+            LolaDefaultRxChannel::Primary => self.ensure_native_producer(LolaTxChannel::Response),
+            LolaDefaultRxChannel::Response => self.ensure_native_producer(LolaTxChannel::Primary),
+            LolaDefaultRxChannel::Both => Ok(()),
+        }
+    }
+
+    #[cfg(feature = "lola-ffi")]
+    fn send_native_sample(
+        &self,
+        channel: LolaTxChannel,
+        loan: crate::sys::NativeTxLoan,
+    ) -> Result<(), UStatus> {
+        let config = self.channel_config(channel);
+        let mut native = self.native_for_channel(channel);
+        if native.is_none() {
+            *native = Some(NativeTransport::new(config)?);
+        }
+        native
+            .as_ref()
+            .expect("LoLa native transport should be initialized")
+            .send(loan)
+    }
+
+    #[cfg(feature = "lola-ffi")]
+    fn native_for_channel(
+        &self,
+        channel: LolaTxChannel,
+    ) -> std::sync::MutexGuard<'_, Option<NativeTransport>> {
+        match channel {
+            LolaTxChannel::Primary => self
+                .native
+                .lock()
+                .expect("LoLa native transport lock poisoned"),
+            LolaTxChannel::Response => self
+                .response_native
+                .lock()
+                .expect("LoLa response native transport lock poisoned"),
+        }
+    }
+
+    fn channel_config(&self, channel: LolaTxChannel) -> &LolaTransportConfig {
+        match channel {
+            LolaTxChannel::Primary => &self.config,
+            LolaTxChannel::Response => self.response_config.as_ref().unwrap_or(&self.config),
+        }
+    }
+
+    fn tx_channel_for_metadata(&self, metadata: &UFrameMetadata) -> LolaTxChannel {
+        if self.response_config.is_some() && metadata.attributes().type_() == UMessageType::Response
+        {
+            LolaTxChannel::Response
+        } else {
+            LolaTxChannel::Primary
+        }
+    }
+
+    fn rx_channels_for_filters(
+        &self,
+        source_filter: &UUri,
+        sink_filter: Option<&UUri>,
+    ) -> LolaRxChannels {
+        if self.response_config.is_none() {
+            return LolaRxChannels::PRIMARY;
+        }
+
+        if sink_filter.is_some_and(UUri::is_rpc_method) {
+            return LolaRxChannels::PRIMARY;
+        }
+
+        if source_filter.verify_no_wildcards().is_ok() && source_filter.is_rpc_method() {
+            return LolaRxChannels::RESPONSE;
+        }
+
+        if sink_filter.is_some() {
+            return LolaRxChannels::RESPONSE;
+        }
+
+        match self.default_rx_channel {
+            LolaDefaultRxChannel::Primary => LolaRxChannels::PRIMARY,
+            LolaDefaultRxChannel::Response => LolaRxChannels::RESPONSE,
+            LolaDefaultRxChannel::Both => LolaRxChannels::BOTH,
+        }
+    }
+
+    #[cfg(feature = "lola-ffi")]
+    fn receive_next_matching_channel(
+        &self,
+        channels: LolaRxChannels,
+    ) -> Result<LolaRxLease, UStatus> {
+        if channels.primary {
+            match self.receive_next_zero_copy() {
+                Ok(frame) => return Ok(frame),
+                Err(status) if status.get_code() == UCode::NotFound => {}
+                Err(status) => return Err(status),
+            }
+        }
+
+        if channels.response {
+            return self.receive_next_response_zero_copy();
+        }
+
+        Err(UStatus::fail_with_code(
+            UCode::NotFound,
+            "no LoLa receive channel selected",
+        ))
+    }
+
+    #[cfg(feature = "lola-ffi")]
     fn receive_next_zero_copy(&self) -> Result<LolaRxLease, UStatus> {
         let mut subscriber = self
             .subscriber
@@ -125,6 +307,28 @@ impl UTransportLola {
         let sample = subscriber
             .as_ref()
             .expect("LoLa subscriber should be initialized")
+            .receive()?;
+        LolaRxLease::from_native(sample)
+    }
+
+    #[cfg(feature = "lola-ffi")]
+    fn receive_next_response_zero_copy(&self) -> Result<LolaRxLease, UStatus> {
+        let Some(response_config) = &self.response_config else {
+            return Err(UStatus::fail_with_code(
+                UCode::NotFound,
+                "no LoLa response channel configured",
+            ));
+        };
+        let mut subscriber = self
+            .response_subscriber
+            .lock()
+            .expect("LoLa native response subscriber lock poisoned");
+        if subscriber.is_none() {
+            *subscriber = Some(NativeSubscriber::new(response_config)?);
+        }
+        let sample = subscriber
+            .as_ref()
+            .expect("LoLa response subscriber should be initialized")
             .receive()?;
         LolaRxLease::from_native(sample)
     }
@@ -146,10 +350,36 @@ impl UTransportLola {
     }
 
     #[cfg(feature = "lola-ffi")]
+    fn receive_next_response_listener_frame(&self) -> Result<LolaRxLease, UStatus> {
+        let Some(response_config) = &self.response_config else {
+            return Err(UStatus::fail_with_code(
+                UCode::NotFound,
+                "no LoLa response channel configured",
+            ));
+        };
+        let mut subscriber = self
+            .response_listener_subscriber
+            .lock()
+            .expect("LoLa native response listener subscriber lock poisoned");
+        if subscriber.is_none() {
+            *subscriber = Some(NativeSubscriber::new(response_config)?);
+        }
+        let sample = subscriber
+            .as_ref()
+            .expect("LoLa response listener subscriber should be initialized")
+            .receive()?;
+        LolaRxLease::from_native(sample)
+    }
+
+    #[cfg(feature = "lola-ffi")]
     fn drop_listener_subscriber(&self) {
         self.listener_subscriber
             .lock()
             .expect("LoLa native listener subscriber lock poisoned")
+            .take();
+        self.response_listener_subscriber
+            .lock()
+            .expect("LoLa native response listener subscriber lock poisoned")
             .take();
     }
 
@@ -217,20 +447,52 @@ impl UTransportLola {
     fn poll_native_listener_frames(
         &self,
     ) -> Result<Vec<(Arc<dyn UEncodedZeroCopyListener<LolaRxLease>>, LolaRxLease)>, UStatus> {
-        let frame = match self.receive_next_listener_frame() {
-            Ok(frame) => frame,
-            Err(status) if status.get_code() == UCode::NotFound => return Ok(Vec::new()),
-            Err(status) => return Err(status),
+        let mut frames = Vec::with_capacity(2);
+        let channels = {
+            let listeners = self
+                .encoded_listeners
+                .lock()
+                .expect("LoLa encoded listener registry lock poisoned");
+            listeners
+                .iter()
+                .fold(LolaRxChannels::NONE, |channels, registration| {
+                    LolaRxChannels {
+                        primary: channels.primary || registration.channels.primary,
+                        response: channels.response || registration.channels.response,
+                    }
+                })
         };
+
+        if channels.primary {
+            match self.receive_next_listener_frame() {
+                Ok(frame) => frames.push(frame),
+                Err(status) if status.get_code() == UCode::NotFound => {}
+                Err(status) => return Err(status),
+            }
+        }
+        if channels.response {
+            match self.receive_next_response_listener_frame() {
+                Ok(frame) => frames.push(frame),
+                Err(status) if status.get_code() == UCode::NotFound => {}
+                Err(status) => return Err(status),
+            }
+        }
+        if frames.is_empty() {
+            return Ok(Vec::new());
+        }
         let listeners = self
             .encoded_listeners
             .lock()
             .expect("LoLa encoded listener registry lock poisoned");
-        Ok(listeners
-            .iter()
-            .filter(|registration| registration.matches_frame(&frame))
-            .map(|registration| (Arc::clone(&registration.listener), frame.clone()))
-            .collect())
+        let mut deliveries = Vec::with_capacity(listeners.len() * frames.len());
+        for frame in frames {
+            deliveries.extend(
+                listeners
+                    .iter()
+                    .map(|registration| (Arc::clone(&registration.listener), frame.clone())),
+            );
+        }
+        Ok(deliveries)
     }
 
     fn pop_queued_pull_sample(
@@ -305,7 +567,6 @@ impl UTransportLola {
                 .expect("LoLa encoded listener registry lock poisoned");
             listeners
                 .iter()
-                .filter(|registration| registration.matches_frame(frame))
                 .map(|registration| Arc::clone(&registration.listener))
                 .collect::<Vec<_>>()
         };
@@ -323,11 +584,16 @@ impl UTransportLola {
                 "payload alignment must be a non-zero power of two",
             ));
         }
-        if alignment > self.config.sample_alignment {
+        if alignment > self.config.sample_alignment
+            || self
+                .response_config
+                .as_ref()
+                .is_some_and(|config| alignment > config.sample_alignment)
+        {
             return Err(UStatus::fail_with_code(
                 UCode::InvalidArgument,
                 format!(
-                    "requested payload alignment {alignment} exceeds LoLa sample alignment {}",
+                    "requested payload alignment {alignment} exceeds configured LoLa sample alignment {}",
                     self.config.sample_alignment
                 ),
             ));
@@ -371,6 +637,7 @@ pub struct LolaPullMismatchQueueDiagnostics {
 struct EncodedListenerRegistration {
     source_filter: UUri,
     sink_filter: Option<UUri>,
+    channels: LolaRxChannels,
     listener: Arc<dyn UEncodedZeroCopyListener<LolaRxLease>>,
 }
 
@@ -379,17 +646,14 @@ impl EncodedListenerRegistration {
         source_filter: &UUri,
         sink_filter: Option<&UUri>,
         listener: Arc<dyn UEncodedZeroCopyListener<LolaRxLease>>,
+        channels: LolaRxChannels,
     ) -> Self {
         Self {
             source_filter: source_filter.to_owned(),
             sink_filter: sink_filter.map(ToOwned::to_owned),
+            channels,
             listener,
         }
-    }
-
-    #[cfg(any(feature = "test-stub", feature = "lola-ffi"))]
-    fn matches_frame(&self, frame: &LolaRxLease) -> bool {
-        frame_matches(frame, &self.source_filter, self.sink_filter.as_ref())
     }
 
     fn has_same_identity(
@@ -402,6 +666,31 @@ impl EncodedListenerRegistration {
             && self.sink_filter.as_ref() == sink_filter
             && Arc::ptr_eq(&self.listener, listener)
     }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct LolaRxChannels {
+    primary: bool,
+    response: bool,
+}
+
+impl LolaRxChannels {
+    const PRIMARY: Self = Self {
+        primary: true,
+        response: false,
+    };
+    const RESPONSE: Self = Self {
+        primary: false,
+        response: true,
+    };
+    const BOTH: Self = Self {
+        primary: true,
+        response: true,
+    };
+    const NONE: Self = Self {
+        primary: false,
+        response: false,
+    };
 }
 
 fn frame_matches(frame: &LolaRxLease, source_filter: &UUri, sink_filter: Option<&UUri>) -> bool {
@@ -423,6 +712,34 @@ impl LolaZeroCopyCore {
         W: UWire,
     {
         self.into_native_prefix_wire_transport(wire)
+    }
+}
+
+#[cfg(feature = "lola-ffi")]
+impl Drop for UTransportLola {
+    fn drop(&mut self) {
+        if let Ok(task) = self.listener_task.get_mut() {
+            if let Some(task) = task.take() {
+                task.abort();
+            }
+        }
+        if let Ok(listeners) = self.encoded_listeners.get_mut() {
+            listeners.clear();
+        }
+
+        take_mutex_option(&mut self.native);
+        take_mutex_option(&mut self.response_native);
+        take_mutex_option(&mut self.listener_subscriber);
+        take_mutex_option(&mut self.response_listener_subscriber);
+        take_mutex_option(&mut self.subscriber);
+        take_mutex_option(&mut self.response_subscriber);
+    }
+}
+
+#[cfg(feature = "lola-ffi")]
+fn take_mutex_option<T>(value: &mut Mutex<Option<T>>) {
+    if let Ok(value) = value.get_mut() {
+        value.take();
     }
 }
 
@@ -452,8 +769,9 @@ impl UZeroCopyTransportImpl for UTransportLola {
 
         #[cfg(feature = "lola-ffi")]
         {
+            let channels = self.rx_channels_for_filters(source_filter, sink_filter);
             loop {
-                let frame = self.receive_next_zero_copy()?;
+                let frame = self.receive_next_matching_channel(channels)?;
                 if frame_matches(&frame, source_filter, sink_filter) {
                     return Ok(frame);
                 }
@@ -532,17 +850,19 @@ impl UZeroCopyTransportCore for UTransportLola {
         let encoded_metadata = spec.encoded_metadata().to_vec();
         let payload_len = spec.payload_len();
         let alignment = spec.payload_alignment_proof().as_usize();
+        let channel = self.tx_channel_for_metadata(&metadata);
         self.validate_payload_alignment(alignment)?;
 
         #[cfg(feature = "lola-ffi")]
         {
-            let sample = self.native.loan_sample()?;
+            let sample = self.loan_native_sample(channel)?;
             return LolaTxLoan::new_native(
                 metadata,
                 encoded_metadata,
                 sample,
                 payload_len,
                 alignment,
+                channel,
             );
         }
 
@@ -554,6 +874,7 @@ impl UZeroCopyTransportCore for UTransportLola {
                 self.config.sample_size,
                 payload_len,
                 alignment,
+                channel,
             );
         }
 
@@ -567,8 +888,8 @@ impl UZeroCopyTransportCore for UTransportLola {
     async fn send_prepared_zero_copy(&self, buffer: Self::Tx) -> Result<(), UStatus> {
         #[cfg(feature = "lola-ffi")]
         {
-            let loan = buffer.into_native()?;
-            return self.native.send(loan);
+            let (channel, loan) = buffer.into_native()?;
+            return self.send_native_sample(channel, loan);
         }
 
         #[cfg(all(feature = "test-stub", not(feature = "lola-ffi")))]
@@ -596,11 +917,11 @@ impl UZeroCopyTransportCore for UTransportLola {
     ) -> Result<Self::Rx, UStatus> {
         // LoLa stores selected-wire metadata bytes in the physical ULOL frame.
         // Public source/sink filtering happens after UWireRx decodes them.
-        let _ = (source_filter, sink_filter);
 
         #[cfg(feature = "lola-ffi")]
         {
-            self.receive_next_zero_copy()
+            let channels = self.rx_channels_for_filters(source_filter, sink_filter);
+            self.receive_next_matching_channel(channels)
         }
 
         #[cfg(all(feature = "test-stub", not(feature = "lola-ffi")))]
@@ -640,6 +961,7 @@ impl UZeroCopyTransportCore for UTransportLola {
             source_filter,
             sink_filter,
             listener,
+            self.rx_channels_for_filters(source_filter, sink_filter),
         ));
         drop(listeners);
 
@@ -704,17 +1026,19 @@ impl UZeroCopyUninitTransportCore for UTransportLola {
         let encoded_metadata = spec.encoded_metadata().to_vec();
         let payload_len = spec.payload_len();
         let alignment = spec.payload_alignment_proof().as_usize();
+        let channel = self.tx_channel_for_metadata(&metadata);
         self.validate_payload_alignment(alignment)?;
 
         #[cfg(feature = "lola-ffi")]
         {
-            let sample = self.native.loan_sample()?;
+            let sample = self.loan_native_sample(channel)?;
             return LolaUninitTxLoan::new_native(
                 metadata,
                 encoded_metadata,
                 sample,
                 payload_len,
                 alignment,
+                channel,
             );
         }
 
@@ -726,6 +1050,7 @@ impl UZeroCopyUninitTransportCore for UTransportLola {
                 self.config.sample_size,
                 payload_len,
                 alignment,
+                channel,
             );
         }
 

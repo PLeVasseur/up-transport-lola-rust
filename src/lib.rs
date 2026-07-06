@@ -29,7 +29,7 @@ mod transport;
 #[cfg(feature = "lola-ffi")]
 mod sys;
 
-pub use config::{LolaPullMismatchQueueFullPolicy, LolaTransportConfig};
+pub use config::{LolaDefaultRxChannel, LolaPullMismatchQueueFullPolicy, LolaTransportConfig};
 pub use frame::{LolaRxLease, LolaTxLoan, LolaUninitTxLoan};
 #[cfg(feature = "benchmark-owned")]
 pub use owned_benchmark::LolaOwnedCore;
