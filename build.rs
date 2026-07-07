@@ -11,11 +11,13 @@ const BUNDLED_COMMUNICATION_COMMIT: &str = "56c36d4059d276e804c143d14012576ddf1b
 
 fn main() {
     println!("cargo:rerun-if-env-changed=BAZEL");
+    println!("cargo:rerun-if-env-changed=LOLA_ALLOW_DIRTY_COMMUNICATION");
     println!("cargo:rerun-if-env-changed=LOLA_BRIDGE_LIB_DIR");
     println!("cargo:rerun-if-env-changed=LOLA_COMMUNICATION_ROOT");
     println!("cargo:rerun-if-changed=.gitmodules");
     println!("cargo:rerun-if-changed=cpp/up_lola_bridge.cpp");
     println!("cargo:rerun-if-changed=cpp/up_lola_bridge.h");
+    println!("cargo:rerun-if-changed={BUNDLED_COMMUNICATION_PATH}");
 
     if let Ok(lib_dir) = env::var("LOLA_BRIDGE_LIB_DIR") {
         link_bridge(Path::new(&lib_dir));
@@ -75,6 +77,7 @@ fn communication_root(manifest_dir: &Path) -> PathBuf {
     let bundled_root = manifest_dir.join(BUNDLED_COMMUNICATION_PATH);
     ensure_bundled_communication(manifest_dir, &bundled_root);
     verify_bundled_revision(&bundled_root);
+    verify_bundled_worktree_clean(&bundled_root);
     bundled_root
 }
 
@@ -138,6 +141,39 @@ fn verify_bundled_revision(bundled_root: &Path) {
         panic!(
             "bundled S-CORE communication submodule is at {actual}, expected {BUNDLED_COMMUNICATION_COMMIT}.\n\nHow to resolve:\n  1. Run: git submodule update --init --recursive {BUNDLED_COMMUNICATION_PATH}\n  2. Or intentionally use this checkout by setting: LOLA_COMMUNICATION_ROOT={} cargo build",
             bundled_root.display()
+        );
+    }
+}
+
+/// The SHA pin alone cannot detect local edits to the vendored S-CORE tree
+/// (a dirty worktree still reports the pinned HEAD). Fail loudly so a
+/// modified runtime can never silently produce a "green" native validation.
+fn verify_bundled_worktree_clean(bundled_root: &Path) {
+    if env::var_os("LOLA_ALLOW_DIRTY_COMMUNICATION").is_some_and(|v| v == "1") {
+        println!(
+            "cargo:warning=eclipse-score-communication worktree cleanliness check \
+             bypassed via LOLA_ALLOW_DIRTY_COMMUNICATION=1; do not ship this build"
+        );
+        return;
+    }
+    let output = Command::new("git")
+        .args(["status", "--porcelain", "--ignore-submodules=none"])
+        .current_dir(bundled_root)
+        .output()
+        .expect("unable to run git status for the bundled communication tree");
+    if !output.status.success() {
+        panic!(
+            "git status failed for the bundled communication tree: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    if !output.stdout.is_empty() {
+        panic!(
+            "bundled eclipse-score-communication worktree is DIRTY:\n{}\n\
+             Revert local edits (git -C third_party/eclipse-score-communication checkout -- .) \
+             or record a decision and set LOLA_ALLOW_DIRTY_COMMUNICATION=1 for a \
+             non-shippable diagnostic build.",
+            String::from_utf8_lossy(&output.stdout)
         );
     }
 }
