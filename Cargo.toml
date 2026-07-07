@@ -37,7 +37,7 @@ up-rust = { git = "ssh://git@github.com/PLeVasseur/up-rust.git", rev = "e60a4398
 
 [dev-dependencies]
 criterion = { version = "0.5.1", features = ["csv_output"] }
-up-wire-xcdrv2 = { git = "ssh://git@github.com/PLeVasseur/up-wire-xcdrv2-rust.git", rev = "3a89a4699486d0bf37447a5c2d03ce4261b0dcfa" }
+up-wire-xcdrv2 = { git = "ssh://git@github.com/PLeVasseur/up-wire-xcdrv2-rust.git", rev = "27b6a910d7fdb76562ed859939663ed8e8fd1cd4" }
 
 [package.metadata.docs.rs]
 no-default-features = true
