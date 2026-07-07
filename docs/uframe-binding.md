@@ -4,7 +4,7 @@ Binding id: `lola.uframe.ulol.v1`
 
 ## Physical Placement
 
-Selected-wire UFrame metadata is carried inside the LoLa event sample after the fixed `ULOL` frame header and before the application payload. The metadata bytes are the up-rust native-prefix metadata envelope: magic/version, selected-wire identity, payload-family identity, metadata-layout identity, and the selected metadata profile bytes.
+Selected-wire UFrame metadata is carried inside the LoLa event sample after the fixed `ULOL` frame header and before the application payload. The metadata bytes are the UFrame metadata envelope (see up-spec `basics/uframe.adoc`, Metadata envelope and identity registry): magic/version, selected-wire identity, payload-family identity, metadata-layout identity, and the selected metadata profile bytes.
 
 The application payload starts at the aligned payload offset recorded in the `ULOL` header. The `ULOL` header, metadata prefix, and alignment padding are not part of the application payload exposed by selected-wire receive APIs.
 
