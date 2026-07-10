@@ -725,12 +725,12 @@ impl Drop for UTransportLola {
             listeners.clear();
         }
 
-        take_mutex_option(&mut self.native);
-        take_mutex_option(&mut self.response_native);
         take_mutex_option(&mut self.listener_subscriber);
         take_mutex_option(&mut self.response_listener_subscriber);
         take_mutex_option(&mut self.subscriber);
         take_mutex_option(&mut self.response_subscriber);
+        take_mutex_option(&mut self.native);
+        take_mutex_option(&mut self.response_native);
     }
 }
 

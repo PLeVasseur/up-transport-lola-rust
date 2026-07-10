@@ -240,6 +240,26 @@
           ]
         }
       ]
+    },
+    {
+      "instanceSpecifier": "lola/transport_wire/repeated_teardown",
+      "serviceTypeName": "uprotocol.LoLa",
+      "version": { "major": 1, "minor": 0 },
+      "instances": [
+        {
+          "instanceId": 12,
+          "asil-level": "QM",
+          "binding": "SHM",
+          "events": [
+            {
+              "eventName": "UProtocolFrame",
+              "numberOfSampleSlots": 128,
+              "maxSubscribers": 32,
+              "numberOfIpcTracingSlots": 0
+            }
+          ]
+        }
+      ]
     }
   ],
   "global": {

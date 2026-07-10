@@ -307,6 +307,24 @@ where
 }
 
 #[test]
+#[cfg(feature = "lola-ffi")]
+fn native_pull_transport_teardown_is_repeatable() {
+    let topic = UUri::try_from("//vehicle/4210/1/9030").expect("valid URI");
+    for iteration in 0..20 {
+        let transport =
+            UTransportLola::build(test_config("lola/transport_wire/repeated_teardown")).unwrap();
+        let payload = format!("teardown-{iteration}");
+        send_wire_payload::<TestCustomWire>(&transport, topic.clone(), payload.as_bytes());
+        let selected = selected_wire(transport.zero_copy_core(), TestCustomWire);
+        let frame = receive_with_retry(&selected, &topic);
+        assert_eq!(frame.try_contiguous_payload(), Some(payload.as_bytes()));
+        drop(frame);
+        drop(selected);
+        drop(transport);
+    }
+}
+
+#[test]
 #[cfg(any(feature = "test-stub", feature = "lola-ffi"))]
 fn uninit_tx_round_trips_payload() {
     let transport = UTransportLola::build(test_config("lola/transport_wire/uninit_tx")).unwrap();
