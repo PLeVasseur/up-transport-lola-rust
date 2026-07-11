@@ -167,13 +167,18 @@ fn verify_bundled_worktree_clean(bundled_root: &Path) {
             String::from_utf8_lossy(&output.stderr)
         );
     }
-    if !output.stdout.is_empty() {
+    let status = String::from_utf8_lossy(&output.stdout);
+    let dirty = status
+        .lines()
+        .filter(|line| *line != "?? .cargo-ok")
+        .collect::<Vec<_>>();
+    if !dirty.is_empty() {
         panic!(
             "bundled eclipse-score-communication worktree is DIRTY:\n{}\n\
              Revert local edits (git -C third_party/eclipse-score-communication checkout -- .) \
              or record a decision and set LOLA_ALLOW_DIRTY_COMMUNICATION=1 for a \
              non-shippable diagnostic build.",
-            String::from_utf8_lossy(&output.stdout)
+            dirty.join("\n")
         );
     }
 }
