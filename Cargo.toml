@@ -33,11 +33,11 @@ async-trait = "0.1"
 bytes = "1"
 protobuf = { version = "3.7.2", features = ["with-bytes"] }
 tokio = { version = "1.45.1", default-features = false, features = ["rt", "sync", "time"] }
-up-rust = { git = "ssh://git@github.com/PLeVasseur/up-rust.git", rev = "035941bc04d0cca73b79e464fd20ed96a7641332", default-features = false, features = ["protobuf-wire", "selected-wire-user-api", "transport-implementer-api", "wire-implementer-api", "zero-copy-uninit"] }
+up-rust = { git = "ssh://git@github.com/PLeVasseur/up-rust.git", rev = "c4ba2590bc1ff85850f7715397bd020c18e26430", default-features = false, features = ["protobuf-wire", "selected-wire-user-api", "transport-implementer-api", "wire-implementer-api", "zero-copy-uninit"] }
 
 [dev-dependencies]
 criterion = { version = "0.5.1", features = ["csv_output"] }
-up-wire-xcdrv2 = { git = "ssh://git@github.com/PLeVasseur/up-wire-xcdrv2-rust.git", rev = "94bf9cf09731f0bc22ced6858ca257c8423b40f8" }
+up-wire-xcdrv2 = { git = "ssh://git@github.com/PLeVasseur/up-wire-xcdrv2-rust.git", rev = "50cc397ff9a0f2cc66a8ce9a3862fe54b476e615" }
 
 [package.metadata.docs.rs]
 no-default-features = true
