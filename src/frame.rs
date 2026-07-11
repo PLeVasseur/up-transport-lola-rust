@@ -177,6 +177,10 @@ impl LolaTxLoan {
     pub(crate) fn into_vec(self) -> Vec<u8> {
         match self.sample {
             LolaTxStorage::Vec(sample) => sample,
+            #[cfg(feature = "lola-ffi")]
+            LolaTxStorage::Native(_) => {
+                panic!("native LoLa TX storage cannot be converted into a test vector")
+            }
         }
     }
 
@@ -202,6 +206,11 @@ impl LolaTxLoan {
         let channel = self.channel;
         match self.sample {
             LolaTxStorage::Native(sample) => Ok((channel, sample)),
+            #[cfg(feature = "test-stub")]
+            LolaTxStorage::Vec(_) => Err(UStatus::fail_with_code(
+                UCode::Internal,
+                "test-vector LoLa TX storage cannot be sent through the native bridge",
+            )),
         }
     }
 }

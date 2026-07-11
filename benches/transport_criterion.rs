@@ -1004,7 +1004,10 @@ async fn send_stable_payload_contract(
             transports
                 .zero_copy
                 .send_uninit_stable_payload::<CanClassicFrameV1>(metadata, |payload| {
-                    payload_contract::init_can_classic_max(payload, PAYLOAD_CONTRACT_SEQUENCE)
+                    payload_contract::init_can_classic_max(
+                        payload.into_init(),
+                        PAYLOAD_CONTRACT_SEQUENCE,
+                    )
                 })
                 .await
         }
@@ -1012,7 +1015,10 @@ async fn send_stable_payload_contract(
             transports
                 .zero_copy
                 .send_uninit_stable_payload::<CanFdFrameV1>(metadata, |payload| {
-                    payload_contract::init_can_fd_max(payload, PAYLOAD_CONTRACT_SEQUENCE)
+                    payload_contract::init_can_fd_max(
+                        payload.into_init(),
+                        PAYLOAD_CONTRACT_SEQUENCE,
+                    )
                 })
                 .await
         }
@@ -1020,7 +1026,10 @@ async fn send_stable_payload_contract(
             transports
                 .zero_copy
                 .send_uninit_stable_payload::<SomeIpSignalBatchMtuV1>(metadata, |payload| {
-                    payload_contract::init_someip_single_mtu(payload, PAYLOAD_CONTRACT_SEQUENCE)
+                    payload_contract::init_someip_single_mtu(
+                        payload.into_init(),
+                        PAYLOAD_CONTRACT_SEQUENCE,
+                    )
                 })
                 .await
         }
@@ -1028,7 +1037,10 @@ async fn send_stable_payload_contract(
             transports
                 .zero_copy
                 .send_uninit_stable_payload::<StreamChunk4kV1>(metadata, |payload| {
-                    payload_contract::init_streamer_4k(payload, PAYLOAD_CONTRACT_SEQUENCE)
+                    payload_contract::init_streamer_4k(
+                        payload.into_init(),
+                        PAYLOAD_CONTRACT_SEQUENCE,
+                    )
                 })
                 .await
         }
@@ -1037,7 +1049,7 @@ async fn send_stable_payload_contract(
                 .zero_copy
                 .send_uninit_stable_payload::<RadarDetectionListArs548V1>(metadata, |payload| {
                     payload_contract::init_radar_ars548_detection_list(
-                        payload,
+                        payload.into_init(),
                         PAYLOAD_CONTRACT_SEQUENCE,
                     )
                 })
@@ -1047,7 +1059,10 @@ async fn send_stable_payload_contract(
             transports
                 .zero_copy
                 .send_uninit_stable_payload::<StreamChunk64kV1>(metadata, |payload| {
-                    payload_contract::init_streamer_64k(payload, PAYLOAD_CONTRACT_SEQUENCE)
+                    payload_contract::init_streamer_64k(
+                        payload.into_init(),
+                        PAYLOAD_CONTRACT_SEQUENCE,
+                    )
                 })
                 .await
         }
@@ -1057,7 +1072,7 @@ async fn send_stable_payload_contract(
                 .zero_copy
                 .send_uninit_stable_payload::<LidarPointCloudHesaiAt128V1>(metadata, |payload| {
                     payload_contract::init_lidar_hesai_at128_point_cloud(
-                        payload,
+                        payload.into_init(),
                         PAYLOAD_CONTRACT_SEQUENCE,
                     )
                 })
@@ -1069,7 +1084,7 @@ async fn send_stable_payload_contract(
                 .zero_copy
                 .send_uninit_stable_payload::<CameraBayerRggb12pFrame8mpV1>(metadata, |payload| {
                     payload_contract::init_camera_8mp_bayer_rggb12p(
-                        payload,
+                        payload.into_init(),
                         PAYLOAD_CONTRACT_SEQUENCE,
                     )
                 })
