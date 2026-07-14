@@ -40,6 +40,7 @@ use crate::{
 pub struct UTransportLola {
     config: LolaTransportConfig,
     response_config: Option<LolaTransportConfig>,
+    #[cfg(feature = "lola-ffi")]
     default_rx_channel: LolaDefaultRxChannel,
     #[cfg(feature = "lola-ffi")]
     self_ref: Weak<UTransportLola>,
@@ -107,9 +108,12 @@ impl UTransportLola {
         if let Some(response_config) = &response_config {
             response_config.validate()?;
         }
+        #[cfg(not(feature = "lola-ffi"))]
+        let _ = default_rx_channel;
         let transport = Arc::new_cyclic(|_self_ref| Self {
             config,
             response_config,
+            #[cfg(feature = "lola-ffi")]
             default_rx_channel,
             #[cfg(feature = "lola-ffi")]
             self_ref: _self_ref.clone(),
@@ -228,6 +232,7 @@ impl UTransportLola {
         }
     }
 
+    #[cfg(feature = "lola-ffi")]
     fn channel_config(&self, channel: LolaTxChannel) -> &LolaTransportConfig {
         match channel {
             LolaTxChannel::Primary => &self.config,
@@ -243,6 +248,7 @@ impl UTransportLola {
         }
     }
 
+    #[cfg(feature = "lola-ffi")]
     fn rx_channels_for_filters(
         &self,
         source_filter: &UUri,
@@ -443,9 +449,7 @@ impl UTransportLola {
     }
 
     #[cfg(feature = "lola-ffi")]
-    fn poll_native_listener_frames(
-        &self,
-    ) -> Result<Vec<(Arc<dyn UEncodedZeroCopyListener<LolaRxLease>>, LolaRxLease)>, UStatus> {
+    fn poll_native_listener_frames(&self) -> Result<Vec<EncodedListenerDelivery>, UStatus> {
         let mut frames = Vec::with_capacity(2);
         let channels = {
             let listeners = self
@@ -636,25 +640,15 @@ pub struct LolaPullMismatchQueueDiagnostics {
 struct EncodedListenerRegistration {
     source_filter: UUri,
     sink_filter: Option<UUri>,
+    #[cfg(feature = "lola-ffi")]
     channels: LolaRxChannels,
     listener: Arc<dyn UEncodedZeroCopyListener<LolaRxLease>>,
 }
 
-impl EncodedListenerRegistration {
-    fn new(
-        source_filter: &UUri,
-        sink_filter: Option<&UUri>,
-        listener: Arc<dyn UEncodedZeroCopyListener<LolaRxLease>>,
-        channels: LolaRxChannels,
-    ) -> Self {
-        Self {
-            source_filter: source_filter.to_owned(),
-            sink_filter: sink_filter.map(ToOwned::to_owned),
-            channels,
-            listener,
-        }
-    }
+#[cfg(feature = "lola-ffi")]
+type EncodedListenerDelivery = (Arc<dyn UEncodedZeroCopyListener<LolaRxLease>>, LolaRxLease);
 
+impl EncodedListenerRegistration {
     fn has_same_identity(
         &self,
         source_filter: &UUri,
@@ -667,12 +661,14 @@ impl EncodedListenerRegistration {
     }
 }
 
+#[cfg(feature = "lola-ffi")]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct LolaRxChannels {
     primary: bool,
     response: bool,
 }
 
+#[cfg(feature = "lola-ffi")]
 impl LolaRxChannels {
     const PRIMARY: Self = Self {
         primary: true,
@@ -916,6 +912,9 @@ impl UZeroCopyTransportCore for UTransportLola {
         // LoLa stores selected-wire metadata bytes in the physical ULOL frame.
         // Public source/sink filtering happens after UWireRx decodes them.
 
+        #[cfg(not(feature = "lola-ffi"))]
+        let _ = (source_filter, sink_filter);
+
         #[cfg(feature = "lola-ffi")]
         {
             let channels = self.rx_channels_for_filters(source_filter, sink_filter);
@@ -955,12 +954,13 @@ impl UZeroCopyTransportCore for UTransportLola {
                 "LoLa encoded listener already registered for filters",
             ));
         }
-        listeners.push(EncodedListenerRegistration::new(
-            source_filter,
-            sink_filter,
+        listeners.push(EncodedListenerRegistration {
+            source_filter: source_filter.to_owned(),
+            sink_filter: sink_filter.map(ToOwned::to_owned),
             listener,
-            self.rx_channels_for_filters(source_filter, sink_filter),
-        ));
+            #[cfg(feature = "lola-ffi")]
+            channels: self.rx_channels_for_filters(source_filter, sink_filter),
+        });
         drop(listeners);
 
         #[cfg(feature = "lola-ffi")]
