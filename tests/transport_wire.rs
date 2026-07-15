@@ -255,7 +255,7 @@ fn wrong_wire_is_rejected_before_public_receive_exposes_frame() {
         Err(error) => error,
     };
 
-    assert_eq!(error.get_code(), UCode::InvalidArgument);
+    assert_eq!(error.code(), UCode::InvalidArgument);
 }
 
 #[test]
@@ -296,7 +296,7 @@ where
     for _ in 0..50 {
         match block_on_ready(selected.receive_zero_copy(topic, None)) {
             Ok(frame) => return frame,
-            Err(error) if error.get_code() == UCode::NotFound => {
+            Err(error) if error.code() == UCode::NotFound => {
                 last_error = Some(error);
                 std::thread::sleep(std::time::Duration::from_millis(10));
             }
@@ -428,7 +428,7 @@ fn owned_core_wrong_wire_is_rejected_before_public_receive_exposes_frame() {
         Err(error) => error,
     };
 
-    assert_eq!(error.get_code(), UCode::InvalidArgument);
+    assert_eq!(error.code(), UCode::InvalidArgument);
 }
 
 #[test]
@@ -441,7 +441,7 @@ fn direct_raw_tx_requires_selected_wire() {
         Err(error) => error,
     };
 
-    assert_eq!(error.get_code(), UCode::FailedPrecondition);
+    assert_eq!(error.code(), UCode::FailedPrecondition);
 }
 
 #[test]
@@ -455,5 +455,5 @@ fn tx_loan_rejects_alignment_larger_than_sample_alignment() {
         Err(error) => error,
     };
 
-    assert_eq!(error.get_code(), UCode::InvalidArgument);
+    assert_eq!(error.code(), UCode::InvalidArgument);
 }

@@ -813,7 +813,7 @@ mod tests {
             Err(error) => error,
         };
 
-        assert_eq!(error.get_code(), UCode::InvalidArgument);
+        assert_eq!(error.code(), UCode::InvalidArgument);
     }
 
     #[cfg(feature = "test-stub")]

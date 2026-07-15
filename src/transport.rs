@@ -19,8 +19,8 @@ use up_rust::transport_implementer_api::{
 };
 use up_rust::wire_implementer_api::UWire;
 use up_rust::{
-    FrameMessageKind, UCode, UFrameMetadata, UFrameView, UStatus, UUri, UZeroCopyListener,
-    UZeroCopyTransportImpl, UZeroCopyUninitTransportImpl, ValidatedTxLoanSpec,
+    FrameMessageKind, UCode, UFrameMetadata, UFrameView, UStatus, UTxLoanSpec, UUri,
+    UZeroCopyListener, UZeroCopyTransportImpl, UZeroCopyUninitTransportImpl,
 };
 
 #[cfg(any(feature = "test-stub", feature = "lola-ffi"))]
@@ -285,7 +285,7 @@ impl UTransportLola {
         if channels.primary {
             match self.receive_next_zero_copy() {
                 Ok(frame) => return Ok(frame),
-                Err(status) if status.get_code() == UCode::NotFound => {}
+                Err(status) if status.code() == UCode::NotFound => {}
                 Err(status) => return Err(status),
             }
         }
@@ -439,7 +439,7 @@ impl UTransportLola {
                     }
                 }
                 Err(status) => {
-                    if status.get_code() == UCode::InvalidArgument {
+                    if status.code() == UCode::InvalidArgument {
                         eprintln!("discarding invalid LoLa native listener sample: {status:?}");
                     }
                     tokio::time::sleep(Duration::from_millis(100)).await;
@@ -469,14 +469,14 @@ impl UTransportLola {
         if channels.primary {
             match self.receive_next_listener_frame() {
                 Ok(frame) => frames.push(frame),
-                Err(status) if status.get_code() == UCode::NotFound => {}
+                Err(status) if status.code() == UCode::NotFound => {}
                 Err(status) => return Err(status),
             }
         }
         if channels.response {
             match self.receive_next_response_listener_frame() {
                 Ok(frame) => frames.push(frame),
-                Err(status) if status.get_code() == UCode::NotFound => {}
+                Err(status) if status.code() == UCode::NotFound => {}
                 Err(status) => return Err(status),
             }
         }
@@ -742,7 +742,7 @@ impl UZeroCopyTransportImpl for UTransportLola {
     type Tx = LolaTxLoan;
     type Rx = LolaRxLease;
 
-    async fn loan_validated_tx(&self, spec: ValidatedTxLoanSpec) -> Result<Self::Tx, UStatus> {
+    async fn loan_validated_tx(&self, spec: UTxLoanSpec) -> Result<Self::Tx, UStatus> {
         let _ = spec;
         Err(selected_wire_required())
     }
@@ -825,10 +825,7 @@ impl UZeroCopyTransportImpl for UTransportLola {
 impl UZeroCopyUninitTransportImpl for UTransportLola {
     type UninitTx = LolaUninitTxLoan;
 
-    async fn loan_validated_uninit_tx(
-        &self,
-        spec: ValidatedTxLoanSpec,
-    ) -> Result<Self::UninitTx, UStatus> {
+    async fn loan_validated_uninit_tx(&self, spec: UTxLoanSpec) -> Result<Self::UninitTx, UStatus> {
         let _ = spec;
         Err(selected_wire_required())
     }

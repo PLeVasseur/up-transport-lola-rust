@@ -409,7 +409,7 @@ async fn prime_subscriber(transports: &BenchTransports, case: &BenchCase) {
         .await
     {
         Ok(frame) => drop(frame),
-        Err(status) if status.get_code() == UCode::NotFound => {}
+        Err(status) if status.code() == UCode::NotFound => {}
         Err(status) => panic!("failed to prime LoLa pull subscriber: {status:?}"),
     }
 }
@@ -1152,10 +1152,10 @@ async fn receive_payload_contract_ack(
                 return ack;
             }
             Ok(_) => continue,
-            Err(status) if status.get_code() == UCode::NotFound => {
+            Err(status) if status.code() == UCode::NotFound => {
                 tokio::time::sleep(Duration::from_millis(1)).await;
             }
-            Err(status) if status.get_code() == UCode::InvalidArgument => {
+            Err(status) if status.code() == UCode::InvalidArgument => {
                 panic!("invalid LoLa payload-contract sample before measurement: {status:?}");
             }
             Err(status) => panic!("unexpected LoLa payload-contract receive error: {status:?}"),
