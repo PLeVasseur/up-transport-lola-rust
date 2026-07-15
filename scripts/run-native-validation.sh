@@ -48,7 +48,7 @@ run_check() {
 
 run_native() {
     ensure_bazelisk
-    cargo test --all-targets -- --ignored native "$@"
+    cargo test --all-targets "$@"
 }
 
 run_docs() {
