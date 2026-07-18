@@ -438,6 +438,9 @@ impl UTransportLola {
                         listener.on_receive_encoded_zero_copy(frame).await;
                     }
                 }
+                Err(status) if status.code() == UCode::NotFound => {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
                 Err(status) => {
                     if status.code() == UCode::InvalidArgument {
                         eprintln!("discarding invalid LoLa native listener sample: {status:?}");
