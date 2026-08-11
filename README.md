@@ -2,7 +2,14 @@
 
 Zero-copy uProtocol transport for Eclipse S-CORE LoLa.
 
-`UTransportLola` implements `up_rust::zero_copy::UZeroCopyTransport`. It exposes LoLa event samples as native uProtocol frames: callers write only application payload bytes, while the binding stores routing attributes and payload encoding metadata in a hidden `ULOL` frame header and metadata block.
+`UTransportLola` owns LoLa sample mechanics. Applications construct a public
+transport by calling `zero_copy_core().with_selected_wire(wire)`. The generic
+up-rust adapter encodes and validates metadata for that selected wire while LoLa
+carries the encoded metadata and application payload as opaque bytes.
+The physical envelope also carries an untrusted source/sink routing hint so the
+LoLa mechanics layer can retain nonmatching pull samples. The generic adapter
+independently decodes the opaque metadata and rechecks both filters before any
+frame reaches an application; the hint is never public identity authority.
 
 Native-frame conformance coverage includes `ULOL` header validation, standard and
 custom payload encoding preservation, stable-container metadata preservation,
@@ -13,64 +20,87 @@ stable-container borrowing from the LoLa receive lease.
 | uProtocol frame part | LoLa representation |
 | --- | --- |
 | Frame magic/version and lengths | Hidden `ULOL` header |
-| `UAttributes` | Hidden native-frame metadata block |
-| `PayloadEncoding` | Hidden native-frame metadata block |
+| Source/sink routing hint | Hidden, untrusted physical routing bytes |
+| Selected-wire metadata | Hidden opaque metadata block |
 | Alignment padding | Hidden between metadata and payload |
 | Application payload bytes | Exposed `LolaTxLoan` / `LolaRxLease` payload slice |
 
-Metadata is final at `loan_tx`, so LoLa can compute the metadata length and aligned payload offset before returning the transmit loan. After `loan_tx`, `payload_mut()` is the only mutable zero-copy surface.
+Metadata is final when the selected-wire adapter prepares a TX loan, so LoLa can
+compute the metadata length and aligned payload offset before returning it.
+After loan creation, `payload_mut()` is the only mutable initialized surface.
 
-LoLa also implements `up_rust::zero_copy::UZeroCopyUninitTransport`. The initialized
-`loan_tx` path keeps `UTxBuffer::payload()` and `payload_mut()` sound by exposing
-initialized bytes. The uninitialized path is separate and lets stable typed
-payloads be constructed directly in the LoLa event sample without pre-zeroing the
-application payload region; the binding still initializes the `ULOL` header,
-metadata, alignment padding, and fixed-sample tail bytes.
+`LolaZeroCopyCore` also implements `UZeroCopyUninitTransportCore`. Its separate
+uninitialized path lets stable typed payloads be constructed directly in the
+LoLa event sample without pre-zeroing the application payload region; the
+binding still initializes the `ULOL` header, metadata, alignment padding, and
+fixed-sample tail bytes.
 
 ## Typed Payloads
 
-Use `PayloadFormat` serializers to write directly into a LoLa loan:
+Select a wire explicitly before writing a LoLa loan:
 
 ```rust
-use up_rust::{payload::RawBytes, zero_copy::UZeroCopyTransportExt, UFrameMetadata};
+use up_rust::{
+    PayloadEncoding, UFrameMetadata, UProtocolNativeWire, UTxBuffer, UTxLoanSpec,
+    UZeroCopyTransportImpl,
+};
+use up_transport_lola_rust::{LolaTransportConfig, UTransportLola};
 
-async fn send<T>(transport: &T, metadata: UFrameMetadata) -> Result<(), up_rust::UStatus>
-where
-    T: up_rust::zero_copy::UZeroCopyTransport,
-{
-let payload: &[u8] = b"payload";
-transport
-    .send_serialized_zero_copy::<RawBytes, _>(metadata, &payload)
-    .await
+async fn send(config: LolaTransportConfig) -> Result<(), up_rust::UStatus> {
+    let topic = up_rust::UUri::try_from("//vehicle/4210/1/9000")?;
+    let physical = UTransportLola::build(config)?;
+    let transport = physical
+        .zero_copy_core()
+        .with_selected_wire(UProtocolNativeWire);
+    let metadata = UFrameMetadata::publish(topic)
+        .with_payload_encoding(PayloadEncoding::RAW)
+        .build()?;
+    let mut loan = transport
+        .loan_validated_tx(UTxLoanSpec::payload(metadata, 7, 1)?)
+        .await?;
+    loan.payload_mut().copy_from_slice(b"payload");
+    transport.send_validated_zero_copy(loan).await
 }
 ```
 
-Receive code should use `UFrameView::deserialize_from_reader::<Codec, T>()` for owned decodes, or `UContiguousZeroCopyRxFrame::deserialize_borrowed::<Codec, T>()` when the decoded type borrows directly from the LoLa sample payload.
-Stable-container typed receive should use `borrow_stable_payload<T>()` on the
-loan-backed `LolaRxLease`; the diagnostic provenance value is not a safety gate.
+Receive values expose validated metadata through `UFrameView`. Use
+`decode_payload(PayloadDecodeLimit)` for selected-wire owned decoding or
+`borrow_payload<T>()` for validated stable-container borrowing. The diagnostic
+loan provenance value is not a safety gate.
 
 Stable typed payloads can avoid both a source payload copy and codec-level
 default initialization:
 
 ```rust
-use up_rust::{payload::StableContainerPayload, zero_copy::UZeroCopyUninitTransportExt, UFrameMetadata};
+use up_rust::{
+    PayloadCodecIdentity, StableContainerPayload, StableContainerWireFormat,
+    UFrameMetadata,
+};
 
 #[repr(C)]
-#[derive(Clone, Copy, up_rust::StablePayload, up_rust::ByteBackedStablePayload)]
+#[derive(Clone, Copy, up_rust::StablePayload, up_rust::StablePayloadInit)]
 #[stable_payload(type_name = "example.vehicle.VehiclePose")]
 struct VehiclePose {
     x: u64,
     y: u64,
 }
 
-async fn send<T>(transport: &T, metadata: UFrameMetadata) -> Result<(), up_rust::UStatus>
-where
-    T: up_rust::zero_copy::UZeroCopyUninitTransport,
-{
+async fn send_stable(
+    physical: &std::sync::Arc<up_transport_lola_rust::UTransportLola>,
+    topic: up_rust::UUri,
+) -> Result<(), up_rust::UStatus> {
+    let transport = physical
+        .zero_copy_core()
+        .with_selected_wire(StableContainerWireFormat);
+    let metadata = UFrameMetadata::publish(topic)
+        .with_payload_encoding(
+            <StableContainerPayload<VehiclePose> as PayloadCodecIdentity>::encoding(),
+        )
+        .build()?;
     transport
-        .send_uninit_loaned_payload_as::<StableContainerPayload<VehiclePose>, VehiclePose>(
+        .send_stable_payload::<VehiclePose, _>(
             metadata,
-            |slot| Ok(slot.write(VehiclePose { x: 1, y: 2 })),
+            |init| init.into_initializer().x(1).y(2).finish(),
         )
         .await
 }
@@ -84,7 +114,9 @@ its encoding and reports payload presence with length zero. Payload bytes with n
 encoding are rejected before send.
 
 Filtered pull receive preserves nonmatching samples in a bounded internal queue
-so a later matching receive call can still observe them.
+so a later matching receive call can still observe them, including through the
+native LoLa backend. Public delivery always revalidates selected-wire metadata;
+the physical routing hint cannot bypass source or sink filters.
 `LolaTransportConfig::DEFAULT_PULL_MISMATCH_QUEUE_CAPACITY` is 64 retained
 mismatches. When the queue is full, the default
 `LolaPullMismatchQueueFullPolicy::DropOldestAndReport` policy keeps receive calls
@@ -123,7 +155,8 @@ The submodule is pinned to Eclipse S-CORE communication commit `56c36d4059d276e8
 - `bundled`: enables `lola-build-from-source`.
 - `lola-build-from-source`: generates an isolated Bazel workspace under `OUT_DIR`, builds `libup_lola_bridge.so`, and links Cargo against it.
 - `lola-ffi`: enables the Rust FFI backend and expects a prebuilt bridge via `LOLA_BRIDGE_LIB_DIR` unless `lola-build-from-source` is also enabled.
-- `test-stub`: enables the in-process fake backend for fast Rust unit tests. It is not a LoLa runtime.
+- `test-stub`: enables the in-process fake backend for fast Rust unit tests when `lola-ffi` is disabled. It is not a LoLa runtime.
+- `benchmark-owned`: enables the feature-gated `LolaOwnedCore` selected-wire adapter used by the benchmark and owned-wire proof.
 
 Native runtime tests are compiled when `lola-ffi` is enabled and are marked ignored by default. Run them explicitly with `cargo test -- --ignored`.
 

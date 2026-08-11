@@ -13,27 +13,28 @@
 
 //! Eclipse S-CORE LoLa transport for native uProtocol zero-copy frames.
 //!
-//! [`UTransportLola`] implements [`up_rust::zero_copy::UZeroCopyTransport`].
-//! Transmit payloads are serialized directly into fixed-size LoLa event samples,
-//! and receive payloads are exposed through [`LolaRxLease`] while the underlying
-//! LoLa sample is alive.
+//! [`UTransportLola`] provides encoded LoLa sample mechanics. Applications select
+//! a wire through [`LolaZeroCopyCore::with_selected_wire`] before using the public
+//! zero-copy transport API. Transmit payloads are serialized directly into fixed-
+//! size LoLa event samples, and receive payloads remain loan-backed while the
+//! underlying LoLa sample is alive.
 //!
 //! The default `bundled` feature builds and links the native C++ bridge from the
 //! pinned S-CORE communication submodule. The `lola-ffi` feature uses a prebuilt
 //! bridge or the bundled build output. The `test-stub` feature provides an
 //! in-process fake backend for Rust unit tests and is not a LoLa runtime.
 //!
-//! LoLa samples contain a small `ULOL` frame header, hidden native-frame metadata,
-//! alignment padding, and then the application payload bytes. The payload views
-//! exposed by [`LolaTxLoan`] and [`LolaRxLease`] exclude the header, metadata, and
-//! padding. Metadata is fixed when the transmit loan is created so the payload
-//! offset remains stable while serializers write directly into the sample.
+//! LoLa samples contain a small `ULOL` frame header, an untrusted source/sink
+//! routing hint, hidden native-frame metadata, alignment padding, and then the
+//! application payload bytes. The selected-wire adapter independently validates
+//! metadata and filters before public delivery; the routing hint is only used to
+//! retain physical pull mismatches. The payload views exposed by [`LolaTxLoan`]
+//! and [`LolaRxLease`] exclude all envelope bytes. Metadata is fixed when the
+//! transmit loan is created so the payload offset remains stable while serializers
+//! write directly into the sample.
 
 #![warn(rustdoc::bare_urls, rustdoc::broken_intra_doc_links)]
 #![cfg_attr(docsrs, feature(doc_cfg))]
-
-#[cfg(all(feature = "lola-ffi", feature = "test-stub"))]
-compile_error!("features `lola-ffi` and `test-stub` are mutually exclusive");
 
 #[cfg(not(any(feature = "lola-ffi", feature = "test-stub")))]
 compile_error!(
@@ -53,5 +54,5 @@ pub use config::{LolaPullMismatchQueueFullPolicy, LolaTransportConfig};
 pub use frame::{LolaRxLease, LolaTxLoan, LolaUninitTxLoan};
 #[cfg(feature = "benchmark-owned")]
 #[cfg_attr(docsrs, doc(cfg(feature = "benchmark-owned")))]
-pub use owned_benchmark::BenchmarkOwnedLolaTransport;
-pub use transport::{LolaPullMismatchQueueDiagnostics, UTransportLola};
+pub use owned_benchmark::LolaOwnedCore;
+pub use transport::{LolaPullMismatchQueueDiagnostics, LolaZeroCopyCore, UTransportLola};

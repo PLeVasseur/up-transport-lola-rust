@@ -11,7 +11,7 @@ use up_rust::{UCode, UStatus};
 pub enum LolaPullMismatchQueueFullPolicy {
     /// Preserve bounded pull receive behavior by dropping the oldest retained mismatch.
     DropOldestAndReport,
-    /// Reject the newest mismatch and return [`UCode::RESOURCE_EXHAUSTED`] to the receive call.
+    /// Reject the newest mismatch and return [`UCode::ResourceExhausted`] to the receive call.
     RejectNewestAndReport,
 }
 
@@ -34,8 +34,8 @@ pub struct LolaTransportConfig {
     pub event_name: String,
     /// Fixed LoLa event sample size in bytes.
     ///
-    /// The `ULOL` header, encoded metadata, alignment padding, payload, and any
-    /// unused tail all live within this sample size.
+    /// The `ULOL` header, routing hint, encoded metadata, alignment padding,
+    /// payload, and any unused tail all live within this sample size.
     pub sample_size: usize,
     /// Required LoLa event sample alignment in bytes.
     ///
@@ -76,19 +76,19 @@ impl LolaTransportConfig {
         validate_non_empty("event_name", &self.event_name)?;
         if self.sample_size == 0 {
             return Err(UStatus::fail_with_code(
-                UCode::INVALID_ARGUMENT,
+                UCode::InvalidArgument,
                 "LoLa sample_size must be greater than zero",
             ));
         }
         if self.sample_alignment == 0 || !self.sample_alignment.is_power_of_two() {
             return Err(UStatus::fail_with_code(
-                UCode::INVALID_ARGUMENT,
+                UCode::InvalidArgument,
                 "LoLa sample_alignment must be a non-zero power of two",
             ));
         }
         if self.max_samples == 0 {
             return Err(UStatus::fail_with_code(
-                UCode::INVALID_ARGUMENT,
+                UCode::InvalidArgument,
                 "LoLa max_samples must be greater than zero",
             ));
         }
@@ -116,7 +116,7 @@ impl LolaTransportConfig {
 fn validate_non_empty(field: &str, value: &str) -> Result<(), UStatus> {
     if value.is_empty() {
         return Err(UStatus::fail_with_code(
-            UCode::INVALID_ARGUMENT,
+            UCode::InvalidArgument,
             format!("LoLa {field} must be non-empty"),
         ));
     }

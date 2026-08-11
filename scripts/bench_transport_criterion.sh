@@ -125,11 +125,11 @@ write_summary() {
 
 ## Methodology
 
-The \`owned\` path uses \`BenchmarkOwnedLolaTransport\`, a benchmark-only wrapper behind \`benchmark-owned\` that copies owned frame payload bytes into LoLa's own transmit loans and copies receive leases back into owned frames. It is not the generic copying adapter and is not a product-facing owned API.
+The \`owned\` path uses feature-gated \`LolaOwnedCore\` under the native-prefix selected-wire adapter. It copies owned payload bytes into LoLa transmit loans and receive leases back into owned frames while preserving selected-wire metadata validation.
 
 The headline comparator is \`owned\` vs \`zero_copy_loan_copy\`. The \`zero_copy_uninit_direct\` path is supporting best-case direct true-zero-copy transmit data.
 
-Payload-contract suite: \`protobuf_owned_full\` constructs generated protobuf \`BenchPayload\`, serializes through \`ProtobufPayload\`, sends over \`BenchmarkOwnedLolaTransport\`, receives owned bytes, deserializes, and validates scalar fields plus representative payload bytes. \`stable_zc_nozero_full\` initializes nested \`StableBenchPayloadN\` structs directly in zero-copy loan storage with compile-time checked no-zero \`StablePayloadInit\`, receives a loan-backed frame, borrows the stable typed view, and validates the same public payload contract.
+Payload-contract suite: \`protobuf_owned_full\` transports the canonical generated protobuf fixture through the Protobuf selected-wire owned path. \`stable_zc_nozero_full\` initializes canonical stable fixtures directly in LoLa loan storage through \`StablePayloadInit\`. \`stable_owned_bytes_full\` transports the matching canonical stable bytes through the owned selected-wire path.
 
 Payload-contract transported bytes are intentionally contract-specific: protobuf reports encoded \`BenchPayload\` bytes, while stable reports \`size_of::<StableBenchPayloadN>()\` (logical payload bytes plus a 16-byte header/checksum). This is application payload-contract data, not RawBytes transport-boundary data.
 

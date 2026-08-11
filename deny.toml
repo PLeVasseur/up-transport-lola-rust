@@ -1,0 +1,31 @@
+[advisories]
+version = 2
+yanked = "deny"
+
+[licenses]
+version = 2
+confidence-threshold = 0.8
+allow = [
+    "Apache-2.0",
+    "MIT",
+    "Unicode-3.0",
+]
+
+# The exact XCDRv2 revision has Apache-2.0 SPDX headers but predates a manifest
+# license field. The content hash fails closed if that source changes.
+[[licenses.clarify]]
+crate = "up-wire-xcdrv2@0.0.0"
+expression = "Apache-2.0"
+license-files = [{ path = "src/lib.rs", hash = 0x81cee17d }]
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-git = [
+    "https://github.com/PLeVasseur/up-rust.git",
+    "https://github.com/PLeVasseur/up-wire-xcdrv2-rust.git",
+]

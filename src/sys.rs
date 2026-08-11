@@ -160,7 +160,7 @@ impl NativeTransport {
         let status = unsafe { up_lola_transport_create(&raw const ffi_config, &raw mut out) };
         map_status(status, "create LoLa transport")?;
         let ptr = NonNull::new(out).ok_or_else(|| {
-            UStatus::fail_with_code(UCode::INTERNAL, "LoLa bridge returned null transport")
+            UStatus::fail_with_code(UCode::Internal, "LoLa bridge returned null transport")
         })?;
         Ok(Self {
             ptr,
@@ -217,7 +217,7 @@ impl NativeSubscriber {
         let status = unsafe { up_lola_subscriber_create(&raw const ffi_config, &raw mut out) };
         map_status(status, "create LoLa subscriber")?;
         let ptr = NonNull::new(out).ok_or_else(|| {
-            UStatus::fail_with_code(UCode::INTERNAL, "LoLa bridge returned null subscriber")
+            UStatus::fail_with_code(UCode::Internal, "LoLa bridge returned null subscriber")
         })?;
         Ok(Self {
             ptr,
@@ -261,7 +261,7 @@ impl NativeTxLoan {
         expected_alignment: usize,
     ) -> Result<Self, UStatus> {
         let ptr = NonNull::new(ptr).ok_or_else(|| {
-            UStatus::fail_with_code(UCode::INTERNAL, "LoLa bridge returned null TX loan")
+            UStatus::fail_with_code(UCode::Internal, "LoLa bridge returned null TX loan")
         })?;
         let loan = Self {
             ptr: Some(ptr),
@@ -382,7 +382,7 @@ impl NativeRxSample {
         expected_alignment: usize,
     ) -> Result<Self, UStatus> {
         let ptr = NonNull::new(ptr).ok_or_else(|| {
-            UStatus::fail_with_code(UCode::INTERNAL, "LoLa bridge returned null RX sample")
+            UStatus::fail_with_code(UCode::Internal, "LoLa bridge returned null RX sample")
         })?;
         let sample = Self {
             ptr,
@@ -429,25 +429,25 @@ fn validate_sample_parts(
 ) -> Result<(), UStatus> {
     if data.is_null() {
         return Err(UStatus::fail_with_code(
-            UCode::INTERNAL,
+            UCode::Internal,
             format!("{label} data pointer is null"),
         ));
     }
     if len != expected_len {
         return Err(UStatus::fail_with_code(
-            UCode::INTERNAL,
+            UCode::Internal,
             format!("{label} length {len} does not match configured sample size {expected_len}"),
         ));
     }
     if expected_alignment == 0 || !expected_alignment.is_power_of_two() {
         return Err(UStatus::fail_with_code(
-            UCode::INTERNAL,
+            UCode::Internal,
             format!("{label} has invalid configured sample alignment {expected_alignment}"),
         ));
     }
     if !(data as usize).is_multiple_of(expected_alignment) {
         return Err(UStatus::fail_with_code(
-            UCode::INTERNAL,
+            UCode::Internal,
             format!("{label} data pointer does not satisfy configured sample alignment {expected_alignment}"),
         ));
     }
@@ -466,19 +466,19 @@ fn map_status(status: UpLolaStatusCode, operation: &str) -> Result<(), UStatus> 
     match status {
         UpLolaStatusCode::Ok => Ok(()),
         UpLolaStatusCode::InvalidArgument => Err(UStatus::fail_with_code(
-            UCode::INVALID_ARGUMENT,
+            UCode::InvalidArgument,
             format!("LoLa bridge failed to {operation}"),
         )),
         UpLolaStatusCode::NotFound => Err(UStatus::fail_with_code(
-            UCode::NOT_FOUND,
+            UCode::NotFound,
             format!("LoLa bridge found no sample while trying to {operation}"),
         )),
         UpLolaStatusCode::ResourceExhausted => Err(UStatus::fail_with_code(
-            UCode::RESOURCE_EXHAUSTED,
+            UCode::ResourceExhausted,
             format!("LoLa bridge exhausted resources while trying to {operation}"),
         )),
         UpLolaStatusCode::Internal => Err(UStatus::fail_with_code(
-            UCode::INTERNAL,
+            UCode::Internal,
             format!("LoLa bridge failed to {operation}"),
         )),
     }

@@ -6,30 +6,26 @@
 
 use std::{io::Cursor, mem::MaybeUninit};
 
+use up_rust::transport_implementer_api::UEncodedRxFrame;
 use up_rust::{
-    transport::validate_frame_view_for_transport,
-    zero_copy::{
-        LoanedPayload, LoanedPayloadUninitMut, PayloadLoanProvenance, UContiguousZeroCopyRxFrame,
-        UFrameView, ULoanedContiguousZeroCopyRxFrame, UTxBuffer, UUninitTxBuffer, UZeroCopyRxLease,
-    },
-    PayloadEncoding, UAttributes, UCode, UFrameMetadata, UMessageType, UPayloadFormat, UPriority,
-    UStatus, UUri, UUID,
+    LoanedPayload, PayloadLoanProvenance, UCode, UEncodedLoanedRxFrame, UFrameMetadata, UStatus,
+    UTxBuffer, UUninitTxBuffer, UUri, UWireError,
 };
 
 #[cfg(feature = "lola-ffi")]
 use crate::sys::{NativeRxSample, NativeTxLoan};
 
 const LOLA_FRAME_MAGIC: &[u8; 4] = b"ULOL";
-const LOLA_FRAME_VERSION: u8 = 1;
-const LOLA_FRAME_HEADER_LEN: usize = 20;
+const LOLA_FRAME_VERSION: u8 = 2;
+const LOLA_FRAME_HEADER_LEN: usize = 24;
 
 /// LoLa transmit loan for one native uProtocol frame.
 ///
-/// Values are returned by [`UZeroCopyTransport::loan_tx`](up_rust::zero_copy::UZeroCopyTransport::loan_tx)
-/// implementation for [`UTransportLola`](crate::UTransportLola). The exposed
+/// Values are returned through a selected-wire transport built from
+/// [`LolaZeroCopyCore`](crate::LolaZeroCopyCore). The exposed
 /// [`UTxBuffer::payload_mut`] range points at the application payload inside a
-/// fixed LoLa event sample. The preceding `ULOL` header, encoded metadata, and
-/// alignment padding are hidden from callers.
+/// fixed LoLa event sample. The preceding `ULOL` header, physical routing hint,
+/// encoded metadata, and alignment padding are hidden from callers.
 ///
 /// Metadata is fixed when the loan is created so the payload offset remains
 /// stable while serializers write directly into the exposed payload range.
@@ -49,14 +45,14 @@ pub struct LolaUninitTxLoan {
 }
 
 enum LolaTxStorage {
-    #[cfg(feature = "test-stub")]
+    #[cfg(all(feature = "test-stub", not(feature = "lola-ffi")))]
     Vec(Vec<u8>),
     #[cfg(feature = "lola-ffi")]
     Native(NativeTxLoan),
 }
 
 enum LolaUninitTxStorage {
-    #[cfg(feature = "test-stub")]
+    #[cfg(all(feature = "test-stub", not(feature = "lola-ffi")))]
     Vec(Vec<MaybeUninit<u8>>),
     #[cfg(feature = "lola-ffi")]
     Native(NativeTxLoan),
@@ -65,7 +61,7 @@ enum LolaUninitTxStorage {
 impl LolaTxStorage {
     fn as_slice(&self) -> &[u8] {
         match self {
-            #[cfg(feature = "test-stub")]
+            #[cfg(all(feature = "test-stub", not(feature = "lola-ffi")))]
             Self::Vec(sample) => sample.as_slice(),
             #[cfg(feature = "lola-ffi")]
             Self::Native(sample) => sample.as_slice(),
@@ -74,7 +70,7 @@ impl LolaTxStorage {
 
     fn as_mut_slice(&mut self) -> &mut [u8] {
         match self {
-            #[cfg(feature = "test-stub")]
+            #[cfg(all(feature = "test-stub", not(feature = "lola-ffi")))]
             Self::Vec(sample) => sample.as_mut_slice(),
             #[cfg(feature = "lola-ffi")]
             Self::Native(sample) => sample.as_mut_slice(),
@@ -85,7 +81,7 @@ impl LolaTxStorage {
 impl LolaUninitTxStorage {
     fn as_uninit_slice(&mut self) -> &mut [MaybeUninit<u8>] {
         match self {
-            #[cfg(feature = "test-stub")]
+            #[cfg(all(feature = "test-stub", not(feature = "lola-ffi")))]
             Self::Vec(sample) => sample.as_mut_slice(),
             #[cfg(feature = "lola-ffi")]
             Self::Native(sample) => sample.as_uninit_slice(),
@@ -94,16 +90,22 @@ impl LolaUninitTxStorage {
 }
 
 impl LolaTxLoan {
-    #[cfg(feature = "test-stub")]
+    #[cfg(all(feature = "test-stub", not(feature = "lola-ffi")))]
     pub(crate) fn new_vec(
         metadata: UFrameMetadata,
+        encoded_metadata: Vec<u8>,
         sample_size: usize,
         payload_len: usize,
         payload_alignment: usize,
     ) -> Result<Self, UStatus> {
         let mut sample = vec![0_u8; sample_size];
-        let payload_offset =
-            write_frame_header(&metadata, &mut sample, payload_len, payload_alignment)?;
+        let payload_offset = write_frame_header(
+            &metadata,
+            &encoded_metadata,
+            &mut sample,
+            payload_len,
+            payload_alignment,
+        )?;
         Ok(Self {
             metadata,
             sample: LolaTxStorage::Vec(sample),
@@ -115,6 +117,7 @@ impl LolaTxLoan {
     #[cfg(feature = "lola-ffi")]
     pub(crate) fn new_native(
         metadata: UFrameMetadata,
+        encoded_metadata: Vec<u8>,
         mut sample: NativeTxLoan,
         payload_len: usize,
         payload_alignment: usize,
@@ -123,6 +126,7 @@ impl LolaTxLoan {
         initialize_uninit_range(sample.as_uninit_slice(), 0, sample_len)?;
         let payload_offset = write_frame_header(
             &metadata,
+            &encoded_metadata,
             sample.as_mut_slice(),
             payload_len,
             payload_alignment,
@@ -135,10 +139,10 @@ impl LolaTxLoan {
         })
     }
 
-    #[cfg(feature = "test-stub")]
-    pub(crate) fn into_vec(self) -> Result<Vec<u8>, UStatus> {
+    #[cfg(all(feature = "test-stub", not(feature = "lola-ffi")))]
+    pub(crate) fn into_stub_rx(self) -> Result<LolaRxLease, UStatus> {
         match self.sample {
-            LolaTxStorage::Vec(sample) => Ok(sample),
+            LolaTxStorage::Vec(sample) => LolaRxLease::from_vec(sample),
         }
     }
 
@@ -146,27 +150,38 @@ impl LolaTxLoan {
     pub(crate) fn into_native(self) -> Result<NativeTxLoan, UStatus> {
         if self.sample.as_slice().get(..4) != Some(LOLA_FRAME_MAGIC.as_slice()) {
             return Err(UStatus::fail_with_code(
-                UCode::INTERNAL,
+                UCode::Internal,
                 "LoLa TX frame header was not written before send",
             ));
         }
         match self.sample {
             LolaTxStorage::Native(sample) => Ok(sample),
+            #[cfg(all(feature = "test-stub", not(feature = "lola-ffi")))]
+            LolaTxStorage::Vec(_) => Err(UStatus::fail_with_code(
+                UCode::Internal,
+                "test-stub LoLa storage cannot be sent through the native bridge",
+            )),
         }
     }
 }
 
 impl LolaUninitTxLoan {
-    #[cfg(feature = "test-stub")]
+    #[cfg(all(feature = "test-stub", not(feature = "lola-ffi")))]
     pub(crate) fn new_vec(
         metadata: UFrameMetadata,
+        encoded_metadata: Vec<u8>,
         sample_size: usize,
         payload_len: usize,
         payload_alignment: usize,
     ) -> Result<Self, UStatus> {
         let mut sample = vec![MaybeUninit::uninit(); sample_size];
-        let payload_offset =
-            write_frame_header_uninit(&metadata, &mut sample, payload_len, payload_alignment)?;
+        let payload_offset = write_frame_header_uninit(
+            &metadata,
+            &encoded_metadata,
+            &mut sample,
+            payload_len,
+            payload_alignment,
+        )?;
         Ok(Self {
             metadata,
             sample: LolaUninitTxStorage::Vec(sample),
@@ -178,12 +193,14 @@ impl LolaUninitTxLoan {
     #[cfg(feature = "lola-ffi")]
     pub(crate) fn new_native(
         metadata: UFrameMetadata,
+        encoded_metadata: Vec<u8>,
         mut sample: NativeTxLoan,
         payload_len: usize,
         payload_alignment: usize,
     ) -> Result<Self, UStatus> {
         let payload_offset = write_frame_header_uninit(
             &metadata,
+            &encoded_metadata,
             sample.as_uninit_slice(),
             payload_len,
             payload_alignment,
@@ -223,10 +240,6 @@ impl UTxBuffer for LolaTxLoan {
             .get_mut(self.payload_offset..end)
             .expect("LoLa payload layout should be valid")
     }
-
-    fn payload_loan_provenance(&self) -> PayloadLoanProvenance {
-        PayloadLoanProvenance::OpaqueTransportLoan
-    }
 }
 
 impl UUninitTxBuffer for LolaUninitTxLoan {
@@ -236,42 +249,20 @@ impl UUninitTxBuffer for LolaUninitTxLoan {
         &self.metadata
     }
 
-    fn payload_len(&self) -> usize {
-        self.payload_len
-    }
-
-    fn payload_loan_provenance(&self) -> PayloadLoanProvenance {
-        PayloadLoanProvenance::OpaqueTransportLoan
-    }
-
-    fn payload_uninit_mut(&mut self) -> LoanedPayloadUninitMut<'_> {
-        let provenance = self.payload_loan_provenance();
+    fn payload_uninit_mut(&mut self) -> &mut [MaybeUninit<u8>] {
         let end = self
             .payload_offset
             .checked_add(self.payload_len)
             .expect("LoLa payload layout overflow");
-        let payload = self
-            .sample
+        self.sample
             .as_uninit_slice()
             .get_mut(self.payload_offset..end)
-            .expect("LoLa payload layout should be valid");
-        // SAFETY:
-        // - The range was checked against the sample above and is the exact
-        //   visible application payload range computed when the loan was
-        //   created.
-        // - `&mut self` gives exclusive access to the sample while the loaned
-        //   payload view exists.
-        // - Per https://doc.rust-lang.org/stable/std/slice/fn.from_raw_parts_mut.html#safety,
-        //   the backing slice must be "valid for both reads and writes for
-        //   `len * size_of::<T>()` many bytes" and "must not be accessed
-        //   through any other pointer" for the returned lifetime; the mutable
-        //   sample borrow provides that exclusivity.
-        unsafe { LoanedPayloadUninitMut::new_unchecked(payload, provenance) }
+            .expect("LoLa payload layout should be valid")
     }
 
-    unsafe fn assume_payload_init(self) -> Self::Initialized {
+    unsafe fn assume_payload_initialized(self) -> Self::Initialized {
         // SAFETY CONTRACT:
-        // - The caller of `UUninitTxBuffer::assume_payload_init` guarantees the
+        // - The caller of `UUninitTxBuffer::assume_payload_initialized` guarantees the
         //   visible application payload range returned by `payload_uninit_mut`
         //   was fully initialized before conversion.
         // - `write_frame_header_uninit` initialized the LoLa header, serialized
@@ -281,7 +272,7 @@ impl UUninitTxBuffer for LolaUninitTxLoan {
         //   initialized type-state; test-stub mode uses the `Vec::from_raw_parts`
         //   proof below to preserve allocation ownership.
         let sample = match self.sample {
-            #[cfg(feature = "test-stub")]
+            #[cfg(all(feature = "test-stub", not(feature = "lola-ffi")))]
             LolaUninitTxStorage::Vec(mut sample) => {
                 let len = sample.len();
                 let capacity = sample.capacity();
@@ -324,30 +315,39 @@ impl UUninitTxBuffer for LolaUninitTxLoan {
 ///
 /// Dropping the lease releases the underlying LoLa sample. The payload is a
 /// contiguous byte range within the fixed event sample, so this type implements
-/// both [`UZeroCopyRxLease`] and [`UContiguousZeroCopyRxFrame`]. Decoded values
-/// that borrow from [`UContiguousZeroCopyRxFrame::contiguous_payload`] must not
-/// outlive the lease.
+/// [`UEncodedRxFrame`] while the selected-wire adapter owns metadata decoding,
+/// identity checks and the public receive lease.
 ///
-/// Invalid or stale samples are rejected before this type is constructed. Native
-/// diagnostics include the frame magic bytes when they do not match `ULOL`.
+/// Invalid or stale samples are rejected before this type is constructed. The
+/// parsed source/sink routing hint is used only by physical queue/listener
+/// mechanics; selected-wire metadata is decoded and revalidated independently
+/// before public delivery. Native diagnostics include the frame magic bytes when
+/// they do not match `ULOL`.
 pub struct LolaRxLease {
-    metadata: UFrameMetadata,
+    routing_hint: LolaRoutingHint,
+    metadata_offset: usize,
+    metadata_len: usize,
     sample: LolaRxStorage,
     payload_offset: usize,
     payload_len: usize,
 }
 
 enum LolaRxStorage {
-    #[cfg(feature = "test-stub")]
+    #[cfg(all(feature = "test-stub", not(feature = "lola-ffi")))]
     Vec(Vec<u8>),
     #[cfg(feature = "lola-ffi")]
     Native(NativeRxSample),
 }
 
+struct LolaRoutingHint {
+    source: UUri,
+    sink: Option<UUri>,
+}
+
 impl LolaRxStorage {
     fn as_slice(&self) -> &[u8] {
         match self {
-            #[cfg(feature = "test-stub")]
+            #[cfg(all(feature = "test-stub", not(feature = "lola-ffi")))]
             Self::Vec(sample) => sample.as_slice(),
             #[cfg(feature = "lola-ffi")]
             Self::Native(sample) => sample.as_slice(),
@@ -356,34 +356,52 @@ impl LolaRxStorage {
 }
 
 impl LolaRxLease {
-    #[cfg(feature = "test-stub")]
+    #[cfg(all(feature = "test-stub", not(feature = "lola-ffi")))]
     pub(crate) fn from_vec(sample: Vec<u8>) -> Result<Self, UStatus> {
-        let (metadata, payload_offset, payload_len) = read_frame_header(&sample)?;
-        let lease = Self {
-            metadata,
+        let (routing_hint, metadata_offset, metadata_len, payload_offset, payload_len) =
+            read_frame_header(&sample)?;
+        Ok(Self {
+            routing_hint,
+            metadata_offset,
+            metadata_len,
             sample: LolaRxStorage::Vec(sample),
             payload_offset,
             payload_len,
-        };
-        validate_frame_view_for_transport(&lease)?;
-        Ok(lease)
+        })
+    }
+
+    #[cfg(all(feature = "test-stub", not(feature = "lola-ffi")))]
+    pub(crate) fn clone_for_stub(&self) -> Result<Self, UStatus> {
+        match &self.sample {
+            LolaRxStorage::Vec(sample) => Self::from_vec(sample.clone()),
+            #[cfg(feature = "lola-ffi")]
+            LolaRxStorage::Native(_) => Err(UStatus::fail_with_code(
+                UCode::Internal,
+                "native LoLa samples cannot be cloned for the test stub",
+            )),
+        }
     }
 
     #[cfg(feature = "lola-ffi")]
     pub(crate) fn from_native(sample: NativeRxSample) -> Result<Self, UStatus> {
-        let (metadata, payload_offset, payload_len) = read_frame_header(sample.as_slice())?;
-        let lease = Self {
-            metadata,
+        let (routing_hint, metadata_offset, metadata_len, payload_offset, payload_len) =
+            read_frame_header(sample.as_slice())?;
+        Ok(Self {
+            routing_hint,
+            metadata_offset,
+            metadata_len,
             sample: LolaRxStorage::Native(sample),
             payload_offset,
             payload_len,
-        };
-        validate_frame_view_for_transport(&lease)?;
-        Ok(lease)
+        })
+    }
+
+    pub(crate) fn routing_hint(&self) -> (&UUri, Option<&UUri>) {
+        (&self.routing_hint.source, self.routing_hint.sink.as_ref())
     }
 }
 
-impl UFrameView for LolaRxLease {
+impl UEncodedRxFrame for LolaRxLease {
     type PayloadReader<'a>
         = Cursor<&'a [u8]>
     where
@@ -393,8 +411,15 @@ impl UFrameView for LolaRxLease {
     where
         Self: 'a;
 
-    fn metadata(&self) -> &UFrameMetadata {
-        &self.metadata
+    fn encoded_metadata(&self) -> &[u8] {
+        let metadata_end = self
+            .metadata_offset
+            .checked_add(self.metadata_len)
+            .expect("LoLa metadata layout overflow");
+        self.sample
+            .as_slice()
+            .get(self.metadata_offset..metadata_end)
+            .expect("LoLa metadata layout should be valid")
     }
 
     fn payload_len(&self) -> usize {
@@ -402,11 +427,11 @@ impl UFrameView for LolaRxLease {
     }
 
     fn payload_reader(&self) -> Self::PayloadReader<'_> {
-        Cursor::new(self.contiguous_payload())
+        Cursor::new(self.try_contiguous_payload().unwrap_or_default())
     }
 
     fn payload_slices(&self) -> Self::PayloadSlices<'_> {
-        std::iter::once(self.contiguous_payload())
+        std::iter::once(self.try_contiguous_payload().unwrap_or_default())
     }
 
     fn try_contiguous_payload(&self) -> Option<&[u8]> {
@@ -415,20 +440,14 @@ impl UFrameView for LolaRxLease {
     }
 }
 
-impl UZeroCopyRxLease for LolaRxLease {}
-
-impl UContiguousZeroCopyRxFrame for LolaRxLease {
-    fn contiguous_payload(&self) -> &[u8] {
-        self.try_contiguous_payload()
-            .expect("LoLa receive payload layout should be valid")
-    }
-}
-
-impl ULoanedContiguousZeroCopyRxFrame for LolaRxLease {
-    fn loaned_contiguous_payload(&self) -> Result<LoanedPayload<'_>, up_rust::payload::UWireError> {
+impl UEncodedLoanedRxFrame for LolaRxLease {
+    fn loaned_contiguous_payload(&self) -> Result<LoanedPayload<'_>, UWireError> {
         let payload = self
             .try_contiguous_payload()
-            .ok_or(up_rust::payload::UWireError::NotContiguous)?;
+            .ok_or_else(|| UWireError::invalid_payload("LoLa payload is not contiguous"))?;
+        if payload.is_empty() {
+            return Err(UWireError::MissingPayload);
+        }
         // SAFETY:
         // - `payload` is a borrowed range inside this receive lease's LoLa
         //   sample, so it remains valid for the lifetime of `&self`.
@@ -446,31 +465,48 @@ impl ULoanedContiguousZeroCopyRxFrame for LolaRxLease {
 
 fn write_frame_header(
     metadata: &UFrameMetadata,
+    encoded_metadata: &[u8],
     sample: &mut [u8],
     payload_len: usize,
     payload_alignment: usize,
 ) -> Result<usize, UStatus> {
-    let metadata_bytes = encode_metadata(metadata)?;
-    let metadata_len = u32::try_from(metadata_bytes.len()).map_err(|_| {
-        UStatus::fail_with_code(UCode::INVALID_ARGUMENT, "LoLa metadata is too large")
+    let (source, sink) = encoded_routing_hint(metadata)?;
+    let source_len = u16::try_from(source.len()).map_err(|_| {
+        UStatus::fail_with_code(
+            UCode::InvalidArgument,
+            "LoLa source routing hint is too large",
+        )
+    })?;
+    let sink_len = u16::try_from(sink.len()).map_err(|_| {
+        UStatus::fail_with_code(
+            UCode::InvalidArgument,
+            "LoLa sink routing hint is too large",
+        )
+    })?;
+    let routing_len = source.len().checked_add(sink.len()).ok_or_else(|| {
+        UStatus::fail_with_code(UCode::InvalidArgument, "LoLa routing hint layout overflow")
+    })?;
+    let metadata_len = u32::try_from(encoded_metadata.len()).map_err(|_| {
+        UStatus::fail_with_code(UCode::InvalidArgument, "LoLa metadata is too large")
     })?;
     let payload_len_u32 = u32::try_from(payload_len).map_err(|_| {
-        UStatus::fail_with_code(UCode::INVALID_ARGUMENT, "LoLa payload is too large")
+        UStatus::fail_with_code(UCode::InvalidArgument, "LoLa payload is too large")
     })?;
     let payload_offset = payload_offset_for_len(
-        metadata_bytes.len(),
+        routing_len,
+        encoded_metadata.len(),
         payload_alignment,
         sample.as_ptr() as usize,
     )?;
     let payload_offset_u32 = u32::try_from(payload_offset).map_err(|_| {
-        UStatus::fail_with_code(UCode::INVALID_ARGUMENT, "LoLa payload offset is too large")
+        UStatus::fail_with_code(UCode::InvalidArgument, "LoLa payload offset is too large")
     })?;
     let total_len = payload_offset.checked_add(payload_len).ok_or_else(|| {
-        UStatus::fail_with_code(UCode::INVALID_ARGUMENT, "LoLa frame layout overflow")
+        UStatus::fail_with_code(UCode::InvalidArgument, "LoLa frame layout overflow")
     })?;
     if total_len > sample.len() {
         return Err(UStatus::fail_with_code(
-            UCode::RESOURCE_EXHAUSTED,
+            UCode::ResourceExhausted,
             format!(
                 "LoLa frame requires {total_len} bytes but sample has {} bytes",
                 sample.len()
@@ -484,38 +520,61 @@ fn write_frame_header(
     sample[8..12].copy_from_slice(&metadata_len.to_le_bytes());
     sample[12..16].copy_from_slice(&payload_len_u32.to_le_bytes());
     sample[16..20].copy_from_slice(&payload_offset_u32.to_le_bytes());
-    let metadata_end = LOLA_FRAME_HEADER_LEN + metadata_bytes.len();
-    sample[LOLA_FRAME_HEADER_LEN..metadata_end].copy_from_slice(&metadata_bytes);
+    sample[20..22].copy_from_slice(&source_len.to_le_bytes());
+    sample[22..24].copy_from_slice(&sink_len.to_le_bytes());
+    let source_end = LOLA_FRAME_HEADER_LEN + source.len();
+    let sink_end = source_end + sink.len();
+    let metadata_end = sink_end + encoded_metadata.len();
+    sample[LOLA_FRAME_HEADER_LEN..source_end].copy_from_slice(source.as_bytes());
+    sample[source_end..sink_end].copy_from_slice(sink.as_bytes());
+    sample[sink_end..metadata_end].copy_from_slice(encoded_metadata);
     Ok(payload_offset)
 }
 
 fn write_frame_header_uninit(
     metadata: &UFrameMetadata,
+    encoded_metadata: &[u8],
     sample: &mut [MaybeUninit<u8>],
     payload_len: usize,
     payload_alignment: usize,
 ) -> Result<usize, UStatus> {
-    let metadata_bytes = encode_metadata(metadata)?;
-    let metadata_len = u32::try_from(metadata_bytes.len()).map_err(|_| {
-        UStatus::fail_with_code(UCode::INVALID_ARGUMENT, "LoLa metadata is too large")
+    let (source, sink) = encoded_routing_hint(metadata)?;
+    let source_len = u16::try_from(source.len()).map_err(|_| {
+        UStatus::fail_with_code(
+            UCode::InvalidArgument,
+            "LoLa source routing hint is too large",
+        )
+    })?;
+    let sink_len = u16::try_from(sink.len()).map_err(|_| {
+        UStatus::fail_with_code(
+            UCode::InvalidArgument,
+            "LoLa sink routing hint is too large",
+        )
+    })?;
+    let routing_len = source.len().checked_add(sink.len()).ok_or_else(|| {
+        UStatus::fail_with_code(UCode::InvalidArgument, "LoLa routing hint layout overflow")
+    })?;
+    let metadata_len = u32::try_from(encoded_metadata.len()).map_err(|_| {
+        UStatus::fail_with_code(UCode::InvalidArgument, "LoLa metadata is too large")
     })?;
     let payload_len_u32 = u32::try_from(payload_len).map_err(|_| {
-        UStatus::fail_with_code(UCode::INVALID_ARGUMENT, "LoLa payload is too large")
+        UStatus::fail_with_code(UCode::InvalidArgument, "LoLa payload is too large")
     })?;
     let payload_offset = frame_layout_bounds(
         sample.len(),
-        metadata_bytes.len(),
+        routing_len,
+        encoded_metadata.len(),
         payload_len,
         payload_alignment,
         sample.as_ptr() as usize,
     )?
     .0;
     let payload_offset_u32 = u32::try_from(payload_offset).map_err(|_| {
-        UStatus::fail_with_code(UCode::INVALID_ARGUMENT, "LoLa payload offset is too large")
+        UStatus::fail_with_code(UCode::InvalidArgument, "LoLa payload offset is too large")
     })?;
     initialize_uninit_range(sample, 0, payload_offset)?;
     let payload_end = payload_offset.checked_add(payload_len).ok_or_else(|| {
-        UStatus::fail_with_code(UCode::INVALID_ARGUMENT, "LoLa frame layout overflow")
+        UStatus::fail_with_code(UCode::InvalidArgument, "LoLa frame layout overflow")
     })?;
     initialize_uninit_range(sample, payload_end, sample.len())?;
     let initialized = initialized_prefix_mut(sample, payload_offset)?;
@@ -524,25 +583,33 @@ fn write_frame_header_uninit(
     initialized[8..12].copy_from_slice(&metadata_len.to_le_bytes());
     initialized[12..16].copy_from_slice(&payload_len_u32.to_le_bytes());
     initialized[16..20].copy_from_slice(&payload_offset_u32.to_le_bytes());
-    let metadata_end = LOLA_FRAME_HEADER_LEN + metadata_bytes.len();
-    initialized[LOLA_FRAME_HEADER_LEN..metadata_end].copy_from_slice(&metadata_bytes);
+    initialized[20..22].copy_from_slice(&source_len.to_le_bytes());
+    initialized[22..24].copy_from_slice(&sink_len.to_le_bytes());
+    let source_end = LOLA_FRAME_HEADER_LEN + source.len();
+    let sink_end = source_end + sink.len();
+    let metadata_end = sink_end + encoded_metadata.len();
+    initialized[LOLA_FRAME_HEADER_LEN..source_end].copy_from_slice(source.as_bytes());
+    initialized[source_end..sink_end].copy_from_slice(sink.as_bytes());
+    initialized[sink_end..metadata_end].copy_from_slice(encoded_metadata);
     Ok(payload_offset)
 }
 
 fn frame_layout_bounds(
     sample_len: usize,
+    routing_len: usize,
     metadata_len: usize,
     payload_len: usize,
     payload_alignment: usize,
     sample_address: usize,
 ) -> Result<(usize, usize), UStatus> {
-    let payload_offset = payload_offset_for_len(metadata_len, payload_alignment, sample_address)?;
+    let payload_offset =
+        payload_offset_for_len(routing_len, metadata_len, payload_alignment, sample_address)?;
     let total_len = payload_offset.checked_add(payload_len).ok_or_else(|| {
-        UStatus::fail_with_code(UCode::INVALID_ARGUMENT, "LoLa frame layout overflow")
+        UStatus::fail_with_code(UCode::InvalidArgument, "LoLa frame layout overflow")
     })?;
     if total_len > sample_len {
         return Err(UStatus::fail_with_code(
-            UCode::RESOURCE_EXHAUSTED,
+            UCode::ResourceExhausted,
             format!("LoLa frame requires {total_len} bytes but sample has {sample_len} bytes"),
         ));
     }
@@ -556,7 +623,7 @@ fn initialize_uninit_range(
 ) -> Result<(), UStatus> {
     let range = sample.get_mut(start..end).ok_or_else(|| {
         UStatus::fail_with_code(
-            UCode::INVALID_ARGUMENT,
+            UCode::InvalidArgument,
             "LoLa initialization range is invalid",
         )
     })?;
@@ -571,7 +638,7 @@ fn initialized_prefix_mut(
     end: usize,
 ) -> Result<&mut [u8], UStatus> {
     let prefix = sample.get_mut(..end).ok_or_else(|| {
-        UStatus::fail_with_code(UCode::INVALID_ARGUMENT, "LoLa prefix range is invalid")
+        UStatus::fail_with_code(UCode::InvalidArgument, "LoLa prefix range is invalid")
     })?;
     // SAFETY:
     // - `prefix` is in bounds and comes from one mutable slice allocation.
@@ -590,16 +657,33 @@ fn initialized_prefix_mut(
     Ok(unsafe { std::slice::from_raw_parts_mut(prefix.as_mut_ptr().cast::<u8>(), prefix.len()) })
 }
 
-fn read_frame_header(sample: &[u8]) -> Result<(UFrameMetadata, usize, usize), UStatus> {
+fn encoded_routing_hint(metadata: &UFrameMetadata) -> Result<(String, String), UStatus> {
+    let source = metadata.source().to_uri(false);
+    let sink = metadata
+        .sink()
+        .map(|sink| sink.to_uri(false))
+        .unwrap_or_default();
+    if source.is_empty() {
+        return Err(UStatus::fail_with_code(
+            UCode::InvalidArgument,
+            "LoLa source routing hint must not be empty",
+        ));
+    }
+    Ok((source, sink))
+}
+
+fn read_frame_header(
+    sample: &[u8],
+) -> Result<(LolaRoutingHint, usize, usize, usize, usize), UStatus> {
     if sample.len() < LOLA_FRAME_HEADER_LEN {
         return Err(UStatus::fail_with_code(
-            UCode::INVALID_ARGUMENT,
+            UCode::InvalidArgument,
             "LoLa sample is shorter than frame header",
         ));
     }
     if &sample[0..4] != LOLA_FRAME_MAGIC {
         return Err(UStatus::fail_with_code(
-            UCode::INVALID_ARGUMENT,
+            UCode::InvalidArgument,
             format!(
                 "invalid LoLa frame magic: {:02X} {:02X} {:02X} {:02X}",
                 sample[0], sample[1], sample[2], sample[3]
@@ -608,7 +692,7 @@ fn read_frame_header(sample: &[u8]) -> Result<(UFrameMetadata, usize, usize), US
     }
     if sample[4] != LOLA_FRAME_VERSION {
         return Err(UStatus::fail_with_code(
-            UCode::INVALID_ARGUMENT,
+            UCode::InvalidArgument,
             "unsupported LoLa frame version",
         ));
     }
@@ -616,59 +700,113 @@ fn read_frame_header(sample: &[u8]) -> Result<(UFrameMetadata, usize, usize), US
     let payload_len = u32::from_le_bytes(sample[12..16].try_into().expect("slice length")) as usize;
     let payload_offset =
         u32::from_le_bytes(sample[16..20].try_into().expect("slice length")) as usize;
-    let metadata_end = LOLA_FRAME_HEADER_LEN
-        .checked_add(metadata_len)
+    let source_len = u16::from_le_bytes(sample[20..22].try_into().expect("slice length")) as usize;
+    let sink_len = u16::from_le_bytes(sample[22..24].try_into().expect("slice length")) as usize;
+    let source_end = LOLA_FRAME_HEADER_LEN
+        .checked_add(source_len)
         .ok_or_else(|| {
-            UStatus::fail_with_code(UCode::INVALID_ARGUMENT, "LoLa metadata layout overflow")
+            UStatus::fail_with_code(UCode::InvalidArgument, "LoLa routing hint layout overflow")
         })?;
+    let sink_end = source_end.checked_add(sink_len).ok_or_else(|| {
+        UStatus::fail_with_code(UCode::InvalidArgument, "LoLa routing hint layout overflow")
+    })?;
+    let metadata_end = sink_end.checked_add(metadata_len).ok_or_else(|| {
+        UStatus::fail_with_code(UCode::InvalidArgument, "LoLa metadata layout overflow")
+    })?;
     if metadata_end > sample.len() {
         return Err(UStatus::fail_with_code(
-            UCode::INVALID_ARGUMENT,
+            UCode::InvalidArgument,
             "LoLa metadata range is outside sample bounds",
         ));
     }
-    let metadata = decode_metadata(&sample[LOLA_FRAME_HEADER_LEN..metadata_end])?;
+    let source = parse_routing_uri(
+        sample
+            .get(LOLA_FRAME_HEADER_LEN..source_end)
+            .ok_or_else(|| {
+                UStatus::fail_with_code(
+                    UCode::InvalidArgument,
+                    "LoLa source routing hint is outside sample bounds",
+                )
+            })?,
+        "source",
+    )?;
+    let sink = if sink_len == 0 {
+        None
+    } else {
+        Some(parse_routing_uri(
+            sample.get(source_end..sink_end).ok_or_else(|| {
+                UStatus::fail_with_code(
+                    UCode::InvalidArgument,
+                    "LoLa sink routing hint is outside sample bounds",
+                )
+            })?,
+            "sink",
+        )?)
+    };
     if payload_offset < metadata_end {
         return Err(UStatus::fail_with_code(
-            UCode::INVALID_ARGUMENT,
+            UCode::InvalidArgument,
             "LoLa payload overlaps metadata",
         ));
     }
     let payload_end = payload_offset.checked_add(payload_len).ok_or_else(|| {
-        UStatus::fail_with_code(UCode::INVALID_ARGUMENT, "LoLa payload layout overflow")
+        UStatus::fail_with_code(UCode::InvalidArgument, "LoLa payload layout overflow")
     })?;
     if payload_end > sample.len() {
         return Err(UStatus::fail_with_code(
-            UCode::INVALID_ARGUMENT,
+            UCode::InvalidArgument,
             "LoLa payload range is outside sample bounds",
         ));
     }
-    Ok((metadata, payload_offset, payload_len))
+    Ok((
+        LolaRoutingHint { source, sink },
+        sink_end,
+        metadata_len,
+        payload_offset,
+        payload_len,
+    ))
+}
+
+fn parse_routing_uri(bytes: &[u8], role: &str) -> Result<UUri, UStatus> {
+    let uri = std::str::from_utf8(bytes).map_err(|error| {
+        UStatus::fail_with_code(
+            UCode::InvalidArgument,
+            format!("LoLa {role} routing hint is not UTF-8: {error}"),
+        )
+    })?;
+    UUri::try_from(uri).map_err(|error| {
+        UStatus::fail_with_code(
+            UCode::InvalidArgument,
+            format!("invalid LoLa {role} routing hint: {error}"),
+        )
+    })
 }
 
 fn payload_offset_for_len(
+    routing_len: usize,
     metadata_len: usize,
     payload_alignment: usize,
     sample_address: usize,
 ) -> Result<usize, UStatus> {
     let metadata_end = LOLA_FRAME_HEADER_LEN
-        .checked_add(metadata_len)
+        .checked_add(routing_len)
+        .and_then(|len| len.checked_add(metadata_len))
         .ok_or_else(|| {
-            UStatus::fail_with_code(UCode::INVALID_ARGUMENT, "LoLa metadata layout overflow")
+            UStatus::fail_with_code(UCode::InvalidArgument, "LoLa metadata layout overflow")
         })?;
     let absolute_metadata_end = sample_address.checked_add(metadata_end).ok_or_else(|| {
-        UStatus::fail_with_code(UCode::INVALID_ARGUMENT, "LoLa metadata layout overflow")
+        UStatus::fail_with_code(UCode::InvalidArgument, "LoLa metadata layout overflow")
     })?;
     let absolute_payload = align_up(absolute_metadata_end, payload_alignment)?;
     absolute_payload.checked_sub(sample_address).ok_or_else(|| {
-        UStatus::fail_with_code(UCode::INVALID_ARGUMENT, "LoLa payload layout overflow")
+        UStatus::fail_with_code(UCode::InvalidArgument, "LoLa payload layout overflow")
     })
 }
 
 fn align_up(value: usize, alignment: usize) -> Result<usize, UStatus> {
     if alignment == 0 || !alignment.is_power_of_two() {
         return Err(UStatus::fail_with_code(
-            UCode::INVALID_ARGUMENT,
+            UCode::InvalidArgument,
             "LoLa payload alignment must be a non-zero power of two",
         ));
     }
@@ -677,362 +815,39 @@ fn align_up(value: usize, alignment: usize) -> Result<usize, UStatus> {
         return Ok(value);
     }
     value.checked_add(alignment - remainder).ok_or_else(|| {
-        UStatus::fail_with_code(UCode::INVALID_ARGUMENT, "LoLa frame layout overflow")
+        UStatus::fail_with_code(UCode::InvalidArgument, "LoLa frame layout overflow")
     })
-}
-
-fn encode_metadata(metadata: &UFrameMetadata) -> Result<Vec<u8>, UStatus> {
-    let mut bytes = Vec::new();
-    write_u64(&mut bytes, metadata.attributes().id().msb());
-    write_u64(&mut bytes, metadata.attributes().id().lsb());
-    bytes.push(message_type_to_byte(metadata.attributes().message_type()));
-    bytes.push(priority_to_byte(metadata.attributes().priority()));
-    write_optional_u32(&mut bytes, metadata.attributes().ttl());
-    append_string(&mut bytes, &metadata.attributes().source().to_uri(false))?;
-    append_string(
-        &mut bytes,
-        metadata
-            .attributes()
-            .sink()
-            .map(|uri| uri.to_uri(false))
-            .as_deref()
-            .unwrap_or_default(),
-    )?;
-    if let Some(encoding) = metadata.encoding() {
-        bytes.push(1);
-        encode_payload_encoding(&mut bytes, encoding)?;
-    } else {
-        bytes.push(0);
-    }
-    write_optional_uuid(&mut bytes, metadata.attributes().request_id());
-    write_optional_string(&mut bytes, metadata.attributes().traceparent())?;
-    write_optional_string(&mut bytes, metadata.attributes().token())?;
-    write_optional_u32(&mut bytes, metadata.attributes().permission_level());
-    write_optional_code(&mut bytes, metadata.attributes().commstatus());
-    Ok(bytes)
-}
-
-fn decode_metadata(mut bytes: &[u8]) -> Result<UFrameMetadata, UStatus> {
-    let id = UUID::from_u64_pair(take_u64(&mut bytes)?, take_u64(&mut bytes)?)
-        .map_err(|err| invalid_metadata(format!("invalid LoLa UUID: {err}")))?;
-    let message_type = byte_to_message_type(take_u8(&mut bytes)?)?;
-    let priority = byte_to_priority(take_u8(&mut bytes)?)?;
-    let ttl = take_optional_u32(&mut bytes)?;
-    let source_string = take_string(&mut bytes)?;
-    let source = UUri::try_from(source_string.as_str())
-        .map_err(|err| invalid_metadata(format!("invalid LoLa source URI: {err}")))?;
-    let sink = {
-        let sink = take_string(&mut bytes)?;
-        if sink.is_empty() {
-            None
-        } else {
-            Some(
-                UUri::try_from(sink.as_str())
-                    .map_err(|err| invalid_metadata(format!("invalid LoLa sink URI: {err}")))?,
-            )
-        }
-    };
-    let encoding = match take_u8(&mut bytes)? {
-        0 => None,
-        1 => Some(decode_payload_encoding(&mut bytes)?),
-        _ => {
-            return Err(UStatus::fail_with_code(
-                UCode::INVALID_ARGUMENT,
-                "invalid LoLa payload encoding presence flag",
-            ))
-        }
-    };
-    let request_id = take_optional_uuid(&mut bytes)?;
-    let traceparent = take_optional_string(&mut bytes)?;
-    let token = take_optional_string(&mut bytes)?;
-    let permission_level = take_optional_u32(&mut bytes)?;
-    let commstatus = take_optional_code(&mut bytes)?;
-
-    let mut attributes =
-        UAttributes::new_unchecked(id, source, sink, message_type).with_priority(priority);
-    if let Some(ttl) = ttl {
-        attributes = attributes.with_ttl(ttl);
-    }
-    if let Some(request_id) = request_id {
-        attributes = attributes.with_request_id(request_id);
-    }
-    if let Some(traceparent) = traceparent {
-        attributes = attributes.with_traceparent(traceparent);
-    }
-    if let Some(token) = token {
-        attributes = attributes.with_token(token);
-    }
-    if let Some(permission_level) = permission_level {
-        attributes = attributes.with_permission_level(permission_level);
-    }
-    if let Some(commstatus) = commstatus {
-        attributes = attributes.with_comm_status(commstatus);
-    }
-    if !bytes.is_empty() {
-        return Err(UStatus::fail_with_code(
-            UCode::INVALID_ARGUMENT,
-            "trailing LoLa metadata bytes",
-        ));
-    }
-    Ok(UFrameMetadata::new_unchecked(attributes, encoding))
-}
-
-fn encode_payload_encoding(bytes: &mut Vec<u8>, encoding: &PayloadEncoding) -> Result<(), UStatus> {
-    match encoding {
-        PayloadEncoding::Standard(format) => {
-            bytes.push(0);
-            bytes.push(format.value());
-        }
-        PayloadEncoding::Custom(custom) => {
-            bytes.push(1);
-            append_string(bytes, custom.id())?;
-            append_string(bytes, custom.content_type())?;
-        }
-    }
-    Ok(())
-}
-
-fn decode_payload_encoding(bytes: &mut &[u8]) -> Result<PayloadEncoding, UStatus> {
-    match take_u8(bytes)? {
-        0 => {
-            let value = take_u8(bytes)?;
-            let format = UPayloadFormat::from_u8(value)
-                .ok_or_else(|| invalid_metadata(format!("invalid LoLa payload format {value}")))?;
-            Ok(PayloadEncoding::standard(format))
-        }
-        1 => PayloadEncoding::try_custom(take_string(bytes)?, take_string(bytes)?).map_err(|err| {
-            invalid_metadata(format!("invalid LoLa custom payload encoding: {err}"))
-        }),
-        _ => Err(invalid_metadata("invalid LoLa payload encoding kind")),
-    }
-}
-
-fn write_u64(dst: &mut Vec<u8>, value: u64) {
-    dst.extend_from_slice(&value.to_le_bytes());
-}
-
-fn write_optional_u32(dst: &mut Vec<u8>, value: Option<u32>) {
-    match value {
-        Some(value) => {
-            dst.push(1);
-            dst.extend_from_slice(&value.to_le_bytes());
-        }
-        None => dst.push(0),
-    }
-}
-
-fn write_optional_uuid(dst: &mut Vec<u8>, value: Option<&UUID>) {
-    match value {
-        Some(value) => {
-            dst.push(1);
-            write_u64(dst, value.msb());
-            write_u64(dst, value.lsb());
-        }
-        None => dst.push(0),
-    }
-}
-
-fn write_optional_string(dst: &mut Vec<u8>, value: Option<&str>) -> Result<(), UStatus> {
-    match value {
-        Some(value) => {
-            dst.push(1);
-            append_string(dst, value)?;
-        }
-        None => dst.push(0),
-    }
-    Ok(())
-}
-
-fn write_optional_code(dst: &mut Vec<u8>, value: Option<UCode>) {
-    match value {
-        Some(value) => {
-            dst.push(1);
-            dst.push(value.as_u8());
-        }
-        None => dst.push(0),
-    }
-}
-
-fn append_string(dst: &mut Vec<u8>, value: &str) -> Result<(), UStatus> {
-    let len = u32::try_from(value.len()).map_err(|_| {
-        UStatus::fail_with_code(UCode::INVALID_ARGUMENT, "LoLa metadata field is too large")
-    })?;
-    dst.extend_from_slice(&len.to_le_bytes());
-    dst.extend_from_slice(value.as_bytes());
-    Ok(())
-}
-
-fn take_u8(src: &mut &[u8]) -> Result<u8, UStatus> {
-    let (value, remaining) = src
-        .split_first()
-        .ok_or_else(|| UStatus::fail_with_code(UCode::INVALID_ARGUMENT, "invalid LoLa metadata"))?;
-    *src = remaining;
-    Ok(*value)
-}
-
-fn take_u64(src: &mut &[u8]) -> Result<u64, UStatus> {
-    let bytes = take_bytes(src, 8)?;
-    Ok(u64::from_le_bytes(bytes.try_into().expect("slice length")))
-}
-
-fn take_optional_u32(src: &mut &[u8]) -> Result<Option<u32>, UStatus> {
-    match take_u8(src)? {
-        0 => Ok(None),
-        1 => {
-            let bytes = take_bytes(src, 4)?;
-            Ok(Some(u32::from_le_bytes(
-                bytes.try_into().expect("slice length"),
-            )))
-        }
-        _ => Err(UStatus::fail_with_code(
-            UCode::INVALID_ARGUMENT,
-            "invalid optional LoLa metadata value",
-        )),
-    }
-}
-
-fn take_optional_uuid(src: &mut &[u8]) -> Result<Option<UUID>, UStatus> {
-    match take_u8(src)? {
-        0 => Ok(None),
-        1 => Ok(Some(
-            UUID::from_u64_pair(take_u64(src)?, take_u64(src)?)
-                .map_err(|err| invalid_metadata(format!("invalid LoLa UUID: {err}")))?,
-        )),
-        _ => Err(UStatus::fail_with_code(
-            UCode::INVALID_ARGUMENT,
-            "invalid optional LoLa metadata value",
-        )),
-    }
-}
-
-fn take_optional_string(src: &mut &[u8]) -> Result<Option<String>, UStatus> {
-    match take_u8(src)? {
-        0 => Ok(None),
-        1 => Ok(Some(take_string(src)?)),
-        _ => Err(UStatus::fail_with_code(
-            UCode::INVALID_ARGUMENT,
-            "invalid optional LoLa metadata value",
-        )),
-    }
-}
-
-fn take_optional_code(src: &mut &[u8]) -> Result<Option<UCode>, UStatus> {
-    match take_u8(src)? {
-        0 => Ok(None),
-        1 => UCode::from_u8(take_u8(src)?).map(Some).ok_or_else(|| {
-            UStatus::fail_with_code(UCode::INVALID_ARGUMENT, "invalid LoLa status code")
-        }),
-        _ => Err(UStatus::fail_with_code(
-            UCode::INVALID_ARGUMENT,
-            "invalid optional LoLa metadata value",
-        )),
-    }
-}
-
-fn take_string(src: &mut &[u8]) -> Result<String, UStatus> {
-    let len_bytes = take_bytes(src, 4)?;
-    let len = usize::try_from(u32::from_le_bytes(
-        len_bytes.try_into().expect("slice length"),
-    ))
-    .map_err(|_| UStatus::fail_with_code(UCode::INVALID_ARGUMENT, "invalid LoLa string length"))?;
-    let bytes = take_bytes(src, len)?;
-    String::from_utf8(bytes.to_vec()).map_err(|_| {
-        UStatus::fail_with_code(UCode::INVALID_ARGUMENT, "invalid LoLa metadata string")
-    })
-}
-
-fn take_bytes<'a>(src: &mut &'a [u8], len: usize) -> Result<&'a [u8], UStatus> {
-    if src.len() < len {
-        return Err(UStatus::fail_with_code(
-            UCode::INVALID_ARGUMENT,
-            "invalid LoLa metadata",
-        ));
-    }
-    let (bytes, remaining) = src.split_at(len);
-    *src = remaining;
-    Ok(bytes)
-}
-
-fn invalid_metadata(message: impl Into<String>) -> UStatus {
-    UStatus::fail_with_code(UCode::INVALID_ARGUMENT, message.into())
-}
-
-fn message_type_to_byte(message_type: UMessageType) -> u8 {
-    match message_type {
-        UMessageType::Publish => 1,
-        UMessageType::Notification => 2,
-        UMessageType::Request => 3,
-        UMessageType::Response => 4,
-    }
-}
-
-fn byte_to_message_type(value: u8) -> Result<UMessageType, UStatus> {
-    match value {
-        1 => Ok(UMessageType::Publish),
-        2 => Ok(UMessageType::Notification),
-        3 => Ok(UMessageType::Request),
-        4 => Ok(UMessageType::Response),
-        _ => Err(UStatus::fail_with_code(
-            UCode::INVALID_ARGUMENT,
-            "invalid LoLa message type",
-        )),
-    }
-}
-
-fn priority_to_byte(priority: UPriority) -> u8 {
-    match priority {
-        UPriority::CS0 => 0,
-        UPriority::CS1 => 1,
-        UPriority::CS2 => 2,
-        UPriority::CS3 => 3,
-        UPriority::CS4 => 4,
-        UPriority::CS5 => 5,
-        UPriority::CS6 => 6,
-    }
-}
-
-fn byte_to_priority(value: u8) -> Result<UPriority, UStatus> {
-    match value {
-        0 => Ok(UPriority::CS0),
-        1 => Ok(UPriority::CS1),
-        2 => Ok(UPriority::CS2),
-        3 => Ok(UPriority::CS3),
-        4 => Ok(UPriority::CS4),
-        5 => Ok(UPriority::CS5),
-        6 => Ok(UPriority::CS6),
-        _ => Err(UStatus::fail_with_code(
-            UCode::INVALID_ARGUMENT,
-            "invalid LoLa priority",
-        )),
-    }
-}
-
-#[cfg(test)]
-fn deterministic_publish_metadata(topic: UUri) -> UFrameMetadata {
-    let id = UUID::from_u64_pair(0x0000_0000_0001_7000, 0x8010_1010_1010_1a1a)
-        .expect("fixed UUID should be valid");
-    UFrameMetadata::new_unchecked(
-        UAttributes::new_unchecked(id, topic, None, UMessageType::Publish),
-        None::<PayloadEncoding>,
-    )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use up_rust::{PayloadEncoding, UUri};
+
+    fn deterministic_publish_metadata(topic: UUri) -> UFrameMetadata {
+        UFrameMetadata::publish(topic)
+            .with_payload_encoding(PayloadEncoding::RAW)
+            .build()
+            .expect("valid test metadata")
+    }
 
     #[test]
     fn uninit_frame_header_does_not_zero_application_payload_range() {
-        let topic = UUri::try_from_parts("vehicle", 0x4210, 1, 0x9008).unwrap();
-        let metadata = deterministic_publish_metadata(topic)
-            .with_encoding(PayloadEncoding::standard(UPayloadFormat::Raw));
         let payload_len = 8;
         let payload_alignment = 4;
         let mut sample = vec![MaybeUninit::new(0xA5); 256];
+        let metadata = deterministic_publish_metadata(
+            UUri::try_from_parts("vehicle", 0x4210, 1, 0x9008).unwrap(),
+        );
 
-        let payload_offset =
-            write_frame_header_uninit(&metadata, &mut sample, payload_len, payload_alignment)
-                .unwrap();
+        let payload_offset = write_frame_header_uninit(
+            &metadata,
+            b"selected-wire-metadata",
+            &mut sample,
+            payload_len,
+            payload_alignment,
+        )
+        .unwrap();
         let payload_end = payload_offset + payload_len;
 
         for byte in sample
@@ -1045,23 +860,22 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "test-stub")]
+    #[cfg(all(feature = "test-stub", not(feature = "lola-ffi")))]
     #[test]
     fn test_stub_uninit_tx_loan_commits_after_exact_payload_initialization() {
         let topic = UUri::try_from_parts("vehicle", 0x4210, 1, 0x9009).unwrap();
-        let metadata = deterministic_publish_metadata(topic)
-            .with_encoding(PayloadEncoding::standard(UPayloadFormat::Raw));
-        let mut loan = LolaUninitTxLoan::new_vec(metadata, 256, 3, 4).unwrap();
+        let metadata = deterministic_publish_metadata(topic);
+        let mut loan =
+            LolaUninitTxLoan::new_vec(metadata, b"selected-wire-metadata".to_vec(), 256, 3, 4)
+                .unwrap();
 
-        {
-            let mut writer = loan.payload_uninit_mut().into_writer();
-            writer.write_all(b"xyz").unwrap();
-            let _initialized = writer.finish().unwrap();
+        for (slot, byte) in loan.payload_uninit_mut().iter_mut().zip(*b"xyz") {
+            slot.write(byte);
         }
 
         // SAFETY: The byte writer successfully initialized exactly the full
         // visible payload range before the uninit loan is committed.
-        let loan = unsafe { loan.assume_payload_init() };
+        let loan = unsafe { loan.assume_payload_initialized() };
 
         assert_eq!(loan.payload(), b"xyz");
         match &loan.sample {
@@ -1072,5 +886,22 @@ mod tests {
             #[cfg(feature = "lola-ffi")]
             LolaTxStorage::Native(_) => unreachable!("test-stub test uses Vec storage"),
         }
+    }
+
+    #[cfg(all(feature = "test-stub", not(feature = "lola-ffi")))]
+    #[test]
+    fn malformed_physical_routing_hint_is_rejected() {
+        let metadata = deterministic_publish_metadata(
+            UUri::try_from_parts("vehicle", 0x4210, 1, 0x9010).unwrap(),
+        );
+        let loan =
+            LolaTxLoan::new_vec(metadata, b"selected-wire-metadata".to_vec(), 256, 3, 4).unwrap();
+        let LolaTxStorage::Vec(mut sample) = loan.sample;
+        sample[LOLA_FRAME_HEADER_LEN] = 0xff;
+
+        let Err(error) = LolaRxLease::from_vec(sample) else {
+            panic!("malformed physical routing hint must be rejected");
+        };
+        assert_eq!(error.code(), UCode::InvalidArgument);
     }
 }
