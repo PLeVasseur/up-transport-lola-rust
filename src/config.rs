@@ -15,6 +15,17 @@ pub enum LolaPullMismatchQueueFullPolicy {
     RejectNewestAndReport,
 }
 
+/// LoLa event used when a receive filter cannot distinguish RPC direction.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum LolaDefaultRxChannel {
+    /// Primary event used for non-RPC frames and RPC requests.
+    Primary,
+    /// Optional response event used for RPC responses.
+    Response,
+    /// Poll both primary and response events.
+    Both,
+}
+
 /// Configuration for a LoLa uProtocol transport instance.
 ///
 /// The same configuration is used by the native bridge to create the LoLa

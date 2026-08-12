@@ -8,6 +8,7 @@ use std::time::Duration;
 #[cfg(all(feature = "test-stub", not(feature = "lola-ffi")))]
 use async_trait::async_trait;
 use up_rust::selected_wire_user_api::UNativePrefixWireTransport;
+use up_rust::UUID;
 #[cfg(all(feature = "test-stub", not(feature = "lola-ffi")))]
 use up_rust::{
     PayloadDecodeLimit, ProtobufWire, UUninitTxBuffer, UZeroCopyListener,
@@ -24,6 +25,7 @@ use up_rust::{
     feature = "benchmark-owned"
 ))]
 use up_rust::{UOwnedFrame, UOwnedTransportImpl};
+use up_transport_lola_rust::LolaDefaultRxChannel;
 #[cfg(all(
     feature = "test-stub",
     not(feature = "lola-ffi"),
@@ -104,6 +106,21 @@ where
     transport.send_validated_zero_copy(loan).await
 }
 
+#[cfg(all(feature = "test-stub", not(feature = "lola-ffi")))]
+fn request_metadata(method: UUri, reply_to: UUri) -> UFrameMetadata {
+    UFrameMetadata::request(method, reply_to, Duration::from_secs(5))
+        .with_payload_encoding(PayloadEncoding::RAW)
+        .build()
+        .expect("valid request metadata")
+}
+
+fn response_metadata(method: UUri, reply_to: UUri) -> UFrameMetadata {
+    UFrameMetadata::response(method, reply_to, UUID::build())
+        .with_payload_encoding(PayloadEncoding::RAW)
+        .build()
+        .expect("valid response metadata")
+}
+
 async fn receive_with_retry<W>(
     transport: &LolaWireTransport<W>,
     source: &UUri,
@@ -157,6 +174,87 @@ async fn external_xcdrv2_round_trips_as_loan_backed_payload() {
     assert_eq!(
         frame.try_contiguous_payload().unwrap().as_ptr() as usize % 8,
         0
+    );
+}
+
+#[cfg(all(feature = "test-stub", not(feature = "lola-ffi")))]
+#[tokio::test]
+async fn dual_rpc_channels_route_requests_and_responses_separately() {
+    let primary = config("lola/r19/rpc-primary");
+    let response = config("lola/r19/rpc-response");
+    let transport = UTransportLola::build_with_response_channel_and_default_rx(
+        primary,
+        Some(response),
+        LolaDefaultRxChannel::Both,
+    )
+    .unwrap();
+    let selected = selected(&transport, UProtocolNativeWire);
+    let method = UUri::try_from_parts("service", 0x4220, 1, 0x1010).unwrap();
+    let reply_to = UUri::try_from_parts("client", 0x4230, 1, 0).unwrap();
+
+    send_payload(
+        &selected,
+        response_metadata(method.clone(), reply_to.clone()),
+        b"response",
+        1,
+    )
+    .await
+    .unwrap();
+    send_payload(
+        &selected,
+        request_metadata(method.clone(), reply_to.clone()),
+        b"request",
+        1,
+    )
+    .await
+    .unwrap();
+
+    let request = selected
+        .receive_validated_zero_copy(&reply_to, Some(&method))
+        .await
+        .unwrap();
+    let response = selected
+        .receive_validated_zero_copy(&method, Some(&reply_to))
+        .await
+        .unwrap();
+    assert_eq!(
+        request.try_contiguous_payload(),
+        Some(b"request".as_slice())
+    );
+    assert_eq!(
+        response.try_contiguous_payload(),
+        Some(b"response".as_slice())
+    );
+}
+
+#[cfg(all(feature = "test-stub", not(feature = "lola-ffi")))]
+#[tokio::test]
+async fn broad_receive_honors_response_default_channel() {
+    let transport = UTransportLola::build_with_response_channel_and_default_rx(
+        config("lola/r19/default-primary"),
+        Some(config("lola/r19/default-response")),
+        LolaDefaultRxChannel::Response,
+    )
+    .unwrap();
+    let selected = selected(&transport, UProtocolNativeWire);
+    let method = UUri::try_from_parts("service", 0x4220, 1, 0x1011).unwrap();
+    let reply_to = UUri::try_from_parts("client", 0x4230, 1, 0).unwrap();
+    send_payload(
+        &selected,
+        response_metadata(method, reply_to),
+        b"response-default",
+        1,
+    )
+    .await
+    .unwrap();
+
+    let frame = selected
+        .receive_validated_zero_copy(&UUri::any(), None)
+        .await
+        .unwrap();
+    assert_eq!(
+        frame.try_contiguous_payload(),
+        Some(b"response-default".as_slice())
     );
 }
 
@@ -377,6 +475,44 @@ async fn listener_receives_matching_selected_wire_frame() {
     );
 }
 
+#[cfg(all(feature = "test-stub", not(feature = "lola-ffi")))]
+#[tokio::test]
+async fn response_listener_uses_response_channel() {
+    let transport = UTransportLola::build_with_response_channel_and_default_rx(
+        config("lola/r19/listener-primary"),
+        Some(config("lola/r19/listener-response")),
+        LolaDefaultRxChannel::Primary,
+    )
+    .unwrap();
+    let selected = selected(&transport, UProtocolNativeWire);
+    let method = UUri::try_from_parts("service", 0x4220, 1, 0x1012).unwrap();
+    let reply_to = UUri::try_from_parts("client", 0x4230, 1, 0).unwrap();
+    let listener = Arc::new(RecordingListener::default());
+    let registration: Arc<dyn UZeroCopyListener<NativeLolaRx>> = listener.clone();
+    selected
+        .register_validated_zero_copy_listener(&method, Some(&reply_to), Arc::clone(&registration))
+        .await
+        .unwrap();
+    send_payload(
+        &selected,
+        response_metadata(method.clone(), reply_to.clone()),
+        b"response-listener",
+        1,
+    )
+    .await
+    .unwrap();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    selected
+        .unregister_validated_zero_copy_listener(&method, Some(&reply_to), registration)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        listener.0.lock().unwrap().as_slice(),
+        [b"response-listener".to_vec()]
+    );
+}
+
 #[cfg(all(
     feature = "test-stub",
     not(feature = "lola-ffi"),
@@ -417,6 +553,15 @@ fn native_config() -> LolaTransportConfig {
 }
 
 #[cfg(feature = "lola-ffi")]
+fn native_response_config() -> LolaTransportConfig {
+    let mut config = native_config();
+    config.instance_specifier = "uprotocol/transportResponse".to_string();
+    config.service_type = "/uprotocol/TransportResponse".to_string();
+    config.event_name = "frameResponse".to_string();
+    config
+}
+
+#[cfg(feature = "lola-ffi")]
 async fn native_guard() -> tokio::sync::MutexGuard<'static, ()> {
     static LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
     LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
@@ -449,6 +594,36 @@ async fn native_selected_wire_round_trip_uses_real_lola_sample() {
             .unwrap()
             .provenance(),
         PayloadLoanProvenance::OpaqueTransportLoan
+    );
+}
+
+#[cfg(feature = "lola-ffi")]
+#[tokio::test]
+#[ignore = "requires the native S-CORE LoLa runtime fixture"]
+async fn native_dual_rpc_channels_use_separate_lola_events() {
+    let _guard = native_guard().await;
+    let transport = UTransportLola::build_with_response_channel_and_default_rx(
+        native_config(),
+        Some(native_response_config()),
+        LolaDefaultRxChannel::Response,
+    )
+    .unwrap();
+    let selected = selected(&transport, UProtocolNativeWire);
+    let method = UUri::try_from_parts("service", 0x4220, 1, 0x1013).unwrap();
+    let reply_to = UUri::try_from_parts("client", 0x4230, 1, 0).unwrap();
+    send_payload(
+        &selected,
+        response_metadata(method.clone(), reply_to.clone()),
+        b"native-response",
+        8,
+    )
+    .await
+    .unwrap();
+
+    let frame = receive_with_retry(&selected, &method).await.unwrap();
+    assert_eq!(
+        frame.try_contiguous_payload(),
+        Some(b"native-response".as_slice())
     );
 }
 
