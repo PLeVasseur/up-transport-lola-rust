@@ -1,23 +1,18 @@
 //! Public selected-wire coverage for LoLa's fake and native backends.
 
+use async_trait::async_trait;
 use std::sync::Arc;
 #[cfg(feature = "lola-ffi")]
 use std::sync::OnceLock;
 use std::time::Duration;
-
-#[cfg(all(feature = "test-stub", not(feature = "lola-ffi")))]
-use async_trait::async_trait;
 use up_rust::selected_wire_user_api::UNativePrefixWireTransport;
 use up_rust::UUID;
 #[cfg(all(feature = "test-stub", not(feature = "lola-ffi")))]
-use up_rust::{
-    PayloadDecodeLimit, ProtobufWire, UUninitTxBuffer, UZeroCopyListener,
-    UZeroCopyUninitTransportImpl,
-};
+use up_rust::{PayloadDecodeLimit, ProtobufWire, UUninitTxBuffer, UZeroCopyUninitTransportImpl};
 use up_rust::{
     PayloadEncoding, PayloadLoanProvenance, UCode, UEncodedLoanedRxFrame, UFrameMetadata,
     UFrameView, UProtocolNativeWire, UStatus, UTxBuffer, UTxLoanSpec, UUri, UWire,
-    UZeroCopyTransportImpl,
+    UZeroCopyListener, UZeroCopyTransportImpl,
 };
 #[cfg(all(
     feature = "test-stub",
@@ -42,11 +37,14 @@ use up_wire_xcdrv2::{
 };
 
 type LolaWireTransport<W> = UNativePrefixWireTransport<LolaZeroCopyCore, W>;
-#[cfg(all(feature = "test-stub", not(feature = "lola-ffi")))]
 type NativeLolaRx = <LolaWireTransport<UProtocolNativeWire> as UZeroCopyTransportImpl>::Rx;
 
 fn topic(resource_id: u16) -> UUri {
     UUri::try_from_parts("vehicle", 0x4210, 1, resource_id).expect("valid test URI")
+}
+
+fn authority_filter(authority: &str) -> UUri {
+    UUri::try_from_parts(authority, u32::MAX, u8::MAX, u16::MAX).expect("valid authority filter")
 }
 
 fn metadata(source: UUri, encoding: PayloadEncoding) -> UFrameMetadata {
@@ -106,7 +104,6 @@ where
     transport.send_validated_zero_copy(loan).await
 }
 
-#[cfg(all(feature = "test-stub", not(feature = "lola-ffi")))]
 fn request_metadata(method: UUri, reply_to: UUri) -> UFrameMetadata {
     UFrameMetadata::request(method, reply_to, Duration::from_secs(5))
         .with_payload_encoding(PayloadEncoding::RAW)
@@ -428,11 +425,9 @@ async fn bounded_mismatch_queue_reports_drop_oldest() {
     assert_eq!(diagnostics.dropped_mismatches, 1);
 }
 
-#[cfg(all(feature = "test-stub", not(feature = "lola-ffi")))]
 #[derive(Default)]
 struct RecordingListener(std::sync::Mutex<Vec<Vec<u8>>>);
 
-#[cfg(all(feature = "test-stub", not(feature = "lola-ffi")))]
 #[async_trait]
 impl UZeroCopyListener<NativeLolaRx> for RecordingListener {
     async fn on_receive_zero_copy(&self, frame: NativeLolaRx) {
@@ -513,6 +508,50 @@ async fn response_listener_uses_response_channel() {
     );
 }
 
+#[cfg(all(feature = "test-stub", not(feature = "lola-ffi")))]
+#[tokio::test]
+async fn broad_rpc_request_listener_honors_primary_default_channel() {
+    let transport = UTransportLola::build_with_response_channel_and_default_rx(
+        config("lola/r19/broad-request-primary"),
+        Some(config("lola/r19/broad-request-response")),
+        LolaDefaultRxChannel::Primary,
+    )
+    .unwrap();
+    let selected = selected(&transport, UProtocolNativeWire);
+    let method = UUri::try_from_parts("service", 0x4220, 1, 0x1014).unwrap();
+    let reply_to = UUri::try_from_parts("client", 0x4230, 1, 0).unwrap();
+    let source_filter = authority_filter("client");
+    let sink_filter = authority_filter("service");
+    let listener = Arc::new(RecordingListener::default());
+    let registration: Arc<dyn UZeroCopyListener<NativeLolaRx>> = listener.clone();
+    selected
+        .register_validated_zero_copy_listener(
+            &source_filter,
+            Some(&sink_filter),
+            Arc::clone(&registration),
+        )
+        .await
+        .unwrap();
+    send_payload(
+        &selected,
+        request_metadata(method, reply_to),
+        b"broad-request",
+        1,
+    )
+    .await
+    .unwrap();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    selected
+        .unregister_validated_zero_copy_listener(&source_filter, Some(&sink_filter), registration)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        listener.0.lock().unwrap().as_slice(),
+        [b"broad-request".to_vec()]
+    );
+}
+
 #[cfg(all(
     feature = "test-stub",
     not(feature = "lola-ffi"),
@@ -567,6 +606,120 @@ async fn native_guard() -> tokio::sync::MutexGuard<'static, ()> {
     LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
         .lock()
         .await
+}
+
+#[cfg(feature = "lola-ffi")]
+#[tokio::test]
+#[ignore = "requires the native S-CORE LoLa runtime fixture"]
+async fn native_listener_registration_precedes_provider_discovery() {
+    let _guard = native_guard().await;
+    let listener_transport = UTransportLola::build(native_config()).unwrap();
+    let selected_listener = selected(&listener_transport, UProtocolNativeWire);
+    let source = topic(0x9011);
+    let listener = Arc::new(RecordingListener::default());
+    let registration: Arc<dyn UZeroCopyListener<NativeLolaRx>> = listener.clone();
+
+    tokio::time::timeout(
+        Duration::from_millis(250),
+        selected_listener.register_validated_zero_copy_listener(
+            &source,
+            None,
+            Arc::clone(&registration),
+        ),
+    )
+    .await
+    .expect("listener registration should not wait for provider discovery")
+    .unwrap();
+
+    let provider_transport = UTransportLola::build(native_config()).unwrap();
+    let selected_provider = selected(&provider_transport, UProtocolNativeWire);
+    send_payload(
+        &selected_provider,
+        metadata(source.clone(), PayloadEncoding::RAW),
+        b"late-provider",
+        8,
+    )
+    .await
+    .unwrap();
+
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if !listener.0.lock().unwrap().is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("listener should discover the late provider and receive its sample");
+
+    selected_listener
+        .unregister_validated_zero_copy_listener(&source, None, registration)
+        .await
+        .unwrap();
+    assert_eq!(
+        listener.0.lock().unwrap().as_slice(),
+        [b"late-provider".to_vec()]
+    );
+}
+
+#[cfg(feature = "lola-ffi")]
+#[tokio::test]
+#[ignore = "requires the native S-CORE LoLa runtime fixture"]
+async fn native_broad_rpc_request_listener_honors_primary_default_channel() {
+    let _guard = native_guard().await;
+    let listener_transport = UTransportLola::build_with_response_channel_and_default_rx(
+        native_config(),
+        Some(native_response_config()),
+        LolaDefaultRxChannel::Primary,
+    )
+    .unwrap();
+    let selected_listener = selected(&listener_transport, UProtocolNativeWire);
+    let source_filter = authority_filter("client");
+    let sink_filter = authority_filter("service");
+    let listener = Arc::new(RecordingListener::default());
+    let registration: Arc<dyn UZeroCopyListener<NativeLolaRx>> = listener.clone();
+    selected_listener
+        .register_validated_zero_copy_listener(
+            &source_filter,
+            Some(&sink_filter),
+            Arc::clone(&registration),
+        )
+        .await
+        .unwrap();
+
+    let provider_transport = UTransportLola::build(native_config()).unwrap();
+    let selected_provider = selected(&provider_transport, UProtocolNativeWire);
+    let method = UUri::try_from_parts("service", 0x4220, 1, 0x1015).unwrap();
+    let reply_to = UUri::try_from_parts("client", 0x4230, 1, 0).unwrap();
+    send_payload(
+        &selected_provider,
+        request_metadata(method, reply_to),
+        b"native-broad-request",
+        8,
+    )
+    .await
+    .unwrap();
+
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if !listener.0.lock().unwrap().is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("broad request listener should receive from the primary event");
+
+    selected_listener
+        .unregister_validated_zero_copy_listener(&source_filter, Some(&sink_filter), registration)
+        .await
+        .unwrap();
+    assert_eq!(
+        listener.0.lock().unwrap().as_slice(),
+        [b"native-broad-request".to_vec()]
+    );
 }
 
 #[cfg(feature = "lola-ffi")]

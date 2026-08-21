@@ -170,14 +170,21 @@ impl UTransportLola {
         if self.response_config.is_none() {
             return LolaRxChannels::PRIMARY;
         }
-        if sink_filter.is_some_and(UUri::is_rpc_method) {
-            return LolaRxChannels::PRIMARY;
+        if let Some(sink_filter) =
+            sink_filter.filter(|sink_filter| sink_filter.verify_no_wildcards().is_ok())
+        {
+            return if sink_filter.is_rpc_method() {
+                LolaRxChannels::PRIMARY
+            } else {
+                LolaRxChannels::RESPONSE
+            };
         }
-        if source_filter.verify_no_wildcards().is_ok() && source_filter.is_rpc_method() {
-            return LolaRxChannels::RESPONSE;
-        }
-        if sink_filter.is_some() {
-            return LolaRxChannels::RESPONSE;
+        if source_filter.verify_no_wildcards().is_ok() {
+            return if source_filter.is_rpc_method() {
+                LolaRxChannels::RESPONSE
+            } else {
+                LolaRxChannels::PRIMARY
+            };
         }
         match self.default_rx_channel {
             LolaDefaultRxChannel::Primary => LolaRxChannels::PRIMARY,
@@ -396,8 +403,10 @@ impl UTransportLola {
         #[cfg(feature = "lola-ffi")]
         {
             let mut deliveries = Vec::new();
-            let listeners = self.listeners.lock().await;
-            for registration in listeners.iter() {
+            let mut listeners = self.listeners.lock().await;
+            for registration in listeners.iter_mut() {
+                registration
+                    .ensure_native_subscribers(&self.config, self.response_config.as_ref())?;
                 for subscriber in [
                     registration.subscriber.as_ref(),
                     registration.response_subscriber.as_ref(),
@@ -516,7 +525,6 @@ pub struct LolaPullMismatchQueueDiagnostics {
 struct ListenerRegistration {
     source_filter: UUri,
     sink_filter: Option<UUri>,
-    #[cfg(all(feature = "test-stub", not(feature = "lola-ffi")))]
     channels: LolaRxChannels,
     listener: Arc<dyn UEncodedZeroCopyListener<LolaRxLease>>,
     #[cfg(feature = "lola-ffi")]
@@ -530,34 +538,36 @@ impl ListenerRegistration {
         source_filter: &UUri,
         sink_filter: Option<&UUri>,
         listener: Arc<dyn UEncodedZeroCopyListener<LolaRxLease>>,
-        _config: &LolaTransportConfig,
         channels: LolaRxChannels,
-        _response_config: Option<&LolaTransportConfig>,
-    ) -> Result<Self, UStatus> {
-        #[cfg(feature = "lola-ffi")]
-        let subscriber = channels
-            .primary
-            .then(|| NativeSubscriber::new(_config))
-            .transpose()?;
-        #[cfg(feature = "lola-ffi")]
-        let response_subscriber = if channels.response {
-            Some(NativeSubscriber::new(_response_config.ok_or_else(
-                || UStatus::fail_with_code(UCode::NotFound, "no LoLa response channel configured"),
-            )?)?)
-        } else {
-            None
-        };
-        Ok(Self {
+    ) -> Self {
+        Self {
             source_filter: source_filter.to_owned(),
             sink_filter: sink_filter.map(ToOwned::to_owned),
-            #[cfg(all(feature = "test-stub", not(feature = "lola-ffi")))]
             channels,
             listener,
             #[cfg(feature = "lola-ffi")]
-            subscriber,
+            subscriber: None,
             #[cfg(feature = "lola-ffi")]
-            response_subscriber,
-        })
+            response_subscriber: None,
+        }
+    }
+
+    #[cfg(feature = "lola-ffi")]
+    fn ensure_native_subscribers(
+        &mut self,
+        config: &LolaTransportConfig,
+        response_config: Option<&LolaTransportConfig>,
+    ) -> Result<(), UStatus> {
+        if self.channels.primary && self.subscriber.is_none() {
+            self.subscriber = Some(NativeSubscriber::new(config)?);
+        }
+        if self.channels.response && self.response_subscriber.is_none() {
+            let response_config = response_config.ok_or_else(|| {
+                UStatus::fail_with_code(UCode::NotFound, "no LoLa response channel configured")
+            })?;
+            self.response_subscriber = Some(NativeSubscriber::new(response_config)?);
+        }
+        Ok(())
     }
 
     #[cfg(feature = "lola-ffi")]
@@ -758,10 +768,8 @@ impl UZeroCopyTransportCore for UTransportLola {
                 source_filter,
                 sink_filter,
                 listener,
-                &self.config,
                 self.rx_channels_for_filters(source_filter, sink_filter),
-                self.response_config.as_ref(),
-            )?;
+            );
             listeners.push(registration);
         }
         self.ensure_listener_task().await
