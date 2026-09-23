@@ -9,17 +9,22 @@
 use std::time::Duration;
 
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
+#[cfg(feature = "payload-contract-benchmarks")]
+use std::sync::Arc;
 use tokio::runtime::{Builder, Runtime};
 #[cfg(feature = "payload-contract-benchmarks")]
 use up_rust::bench_fixtures::payload_contract::{self, *};
 use up_rust::selected_wire_user_api::UNativePrefixWireTransport;
+#[cfg(feature = "payload-contract-benchmarks")]
+use up_rust::{
+    NativeProfile, NativeProfileAgreement, NativeProfileMode, NativeProfileTable, ProtobufWire,
+    StableContainerWireFormat, UWithNativePrefixWire,
+};
 use up_rust::{
     PayloadEncoding, UFrameMetadata, UFrameView, UOwnedFrame, UOwnedTransportImpl,
     UProtocolNativeWire, UTxBuffer, UTxLoanSpec, UUninitTxBuffer, UUri, UZeroCopyTransportImpl,
     UZeroCopyUninitTransportImpl,
 };
-#[cfg(feature = "payload-contract-benchmarks")]
-use up_rust::{ProtobufWire, StableContainerWireFormat};
 use up_transport_lola_rust::{
     LolaOwnedCore, LolaTransportConfig, LolaZeroCopyCore, UTransportLola,
 };
@@ -73,23 +78,48 @@ struct BenchTransports {
     protobuf_owned: ProtobufOwned,
     #[cfg(feature = "payload-contract-benchmarks")]
     stable_owned: StableOwned,
+    #[cfg(feature = "payload-contract-benchmarks")]
+    native_profile: NativeProfileAgreement,
 }
 
 impl BenchTransports {
     fn build(config: LolaTransportConfig) -> Self {
         let physical = UTransportLola::build(config).expect("LoLa benchmark transport");
         let core = physical.zero_copy_core();
+        #[cfg(feature = "payload-contract-benchmarks")]
+        let native_profile = benchmark_native_profile();
         Self {
             raw_zero_copy: core.clone().with_selected_wire(UProtocolNativeWire),
             #[cfg(feature = "payload-contract-benchmarks")]
-            stable_zero_copy: core.clone().with_selected_wire(StableContainerWireFormat),
+            stable_zero_copy: core
+                .clone()
+                .into_stable_container_transport(native_profile.clone()),
             raw_owned: LolaOwnedCore::new(core.clone()).with_selected_wire(UProtocolNativeWire),
             #[cfg(feature = "payload-contract-benchmarks")]
             protobuf_owned: LolaOwnedCore::new(core.clone()).with_selected_wire(ProtobufWire),
             #[cfg(feature = "payload-contract-benchmarks")]
-            stable_owned: LolaOwnedCore::new(core).with_selected_wire(StableContainerWireFormat),
+            stable_owned: LolaOwnedCore::new(core)
+                .into_stable_container_transport(native_profile.clone()),
+            #[cfg(feature = "payload-contract-benchmarks")]
+            native_profile,
         }
     }
+}
+
+#[cfg(feature = "payload-contract-benchmarks")]
+fn benchmark_native_profile() -> NativeProfileAgreement {
+    // One explicitly configured same-process deployment for both benchmark peers.
+    let table = NativeProfileTable::new(payload_contract::all_cases().map(|case| {
+        (
+            PayloadEncoding::from_id(0xF100 + case.case_id()).expect("private benchmark ID"),
+            payload_contract::stable_payload_representation(case)
+                .expect("native fixture representation"),
+        )
+    }))
+    .unwrap();
+    let profile =
+        NativeProfile::new("lola-payload-benchmark", 1, NativeProfileMode::Table(table)).unwrap();
+    NativeProfileAgreement::new(Arc::new(profile.clone()), &profile).unwrap()
 }
 
 fn benchmark(c: &mut Criterion) {
@@ -448,10 +478,14 @@ async fn stable_owned_contract_round_trip(
     source: UUri,
     case: &PayloadContractCase,
 ) {
-    let fixture = payload_contract::stable_owned_fixture_for(case, PAYLOAD_CONTRACT_SEQUENCE)
-        .expect("stable fixture");
+    let fixture = payload_contract::stable_owned_fixture_for(
+        case,
+        PAYLOAD_CONTRACT_SEQUENCE,
+        &transports.native_profile,
+    )
+    .expect("stable fixture");
     let metadata = UFrameMetadata::publish(source.clone())
-        .with_payload_encoding(fixture.encoding)
+        .with_native_payload_identity(fixture.identity)
         .build()
         .expect("stable metadata");
     transports
@@ -569,10 +603,10 @@ where
         ) -> up_rust::InitializedStablePayload<'a, T>
         + Send,
 {
-    use up_rust::PayloadCodecIdentity;
     let metadata = UFrameMetadata::publish(source)
-        .with_payload_encoding(
-            <up_rust::StableContainerPayload<T> as PayloadCodecIdentity>::encoding(),
+        .with_native_payload_identity(
+            up_rust::StableContainerPayload::<T>::identity(&transports.native_profile)
+                .expect("agreed native representation"),
         )
         .build()
         .expect("stable metadata");

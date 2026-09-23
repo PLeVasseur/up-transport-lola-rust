@@ -31,7 +31,7 @@ required-features = ["benchmark-owned"]
 [dependencies]
 async-trait = "0.1"
 tokio = { version = "1.45.1", default-features = false, features = ["rt", "sync", "time"] }
-up-rust = { version = "=0.10.0-SNAPSHOT", git = "https://github.com/PLeVasseur/up-rust.git", rev = "c1d13ca31859b9cc0086ef5d4b953907f24094ec", default-features = false, features = ["protobuf-wire", "selected-wire-user-api", "transport-implementer-api", "wire-implementer-api", "zero-copy-transport"] }
+up-rust = { version = "=0.10.0-SNAPSHOT", git = "https://github.com/PLeVasseur/up-rust.git", rev = "3fcaa348455d167b9092fd71eaa7e7d1eed88051", default-features = false, features = ["protobuf-wire", "selected-wire-user-api", "transport-implementer-api", "wire-implementer-api", "zero-copy-transport"] }
 
 [dev-dependencies]
 criterion = { version = "0.5.1", features = ["csv_output"] }
@@ -40,8 +40,8 @@ crossbeam-epoch = "0.9.20"
 protobuf = { version = "3.7.2", features = ["with-bytes"] }
 serde_json = "1.0.145"
 tokio = { version = "1.45.1", default-features = false, features = ["macros", "rt"] }
-up-rust = { version = "=0.10.0-SNAPSHOT", git = "https://github.com/PLeVasseur/up-rust.git", rev = "c1d13ca31859b9cc0086ef5d4b953907f24094ec", features = ["protobuf-wire", "test-util"] }
-up-wire-xcdrv2 = { version = "=0.0.0", git = "https://github.com/PLeVasseur/up-wire-xcdrv2-rust.git", rev = "78c7002b0a6257e27165a059e04398732f8baf26" }
+up-rust = { version = "=0.10.0-SNAPSHOT", git = "https://github.com/PLeVasseur/up-rust.git", rev = "3fcaa348455d167b9092fd71eaa7e7d1eed88051", features = ["protobuf-wire", "test-util"] }
+up-wire-xcdrv2 = { version = "=0.0.0", git = "https://github.com/PLeVasseur/up-wire-xcdrv2-rust.git", rev = "d0377c6bf75091eb66699955e5068148a8c76311" }
 
 [package.metadata.docs.rs]
 no-default-features = true
