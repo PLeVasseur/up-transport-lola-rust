@@ -6,9 +6,11 @@ use std::sync::Arc;
 use std::sync::OnceLock;
 use std::time::Duration;
 use up_rust::selected_wire_user_api::UNativePrefixWireTransport;
+#[cfg(feature = "lola-ffi")]
+use up_rust::UEncodedRxFrame;
 use up_rust::UUID;
 #[cfg(all(feature = "test-stub", not(feature = "lola-ffi")))]
-use up_rust::{PayloadDecodeLimit, ProtobufWire, UUninitTxBuffer, UZeroCopyUninitTransportImpl};
+use up_rust::{PayloadDecodeLimit, ProtobufWire};
 use up_rust::{
     PayloadEncoding, PayloadLoanProvenance, UCode, UEncodedLoanedRxFrame, UFrameMetadata,
     UFrameView, UProtocolNativeWire, UStatus, UTxBuffer, UTxLoanSpec, UUri, UWire,
@@ -20,6 +22,8 @@ use up_rust::{
     feature = "benchmark-owned"
 ))]
 use up_rust::{UOwnedFrame, UOwnedTransportImpl};
+#[cfg(any(feature = "lola-ffi", feature = "test-stub"))]
+use up_rust::{UUninitTxBuffer, UZeroCopyUninitTransportImpl};
 use up_transport_lola_rust::LolaDefaultRxChannel;
 #[cfg(all(
     feature = "test-stub",
@@ -428,6 +432,87 @@ async fn bounded_mismatch_queue_reports_drop_oldest() {
 #[derive(Default)]
 struct RecordingListener(std::sync::Mutex<Vec<Vec<u8>>>);
 
+#[derive(Default)]
+struct PausedFirstListener {
+    calls: std::sync::atomic::AtomicUsize,
+    entered: tokio::sync::Notify,
+    resume: tokio::sync::Notify,
+    next: tokio::sync::Notify,
+}
+
+#[async_trait]
+impl UZeroCopyListener<NativeLolaRx> for PausedFirstListener {
+    async fn on_receive_zero_copy(&self, _frame: NativeLolaRx) {
+        if self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+            self.entered.notify_one();
+            self.resume.notified().await;
+        } else {
+            self.next.notify_one();
+        }
+    }
+}
+
+async fn check_unregister_invalidates_pending_delivery(core: Arc<UTransportLola>) {
+    let adapter = selected(&core, UProtocolNativeWire);
+    let source = topic(0x901a);
+    let first = Arc::new(PausedFirstListener::default());
+    let first_registration: Arc<dyn UZeroCopyListener<NativeLolaRx>> = first.clone();
+    let removed = Arc::new(RecordingListener::default());
+    let removed_registration: Arc<dyn UZeroCopyListener<NativeLolaRx>> = removed.clone();
+    adapter
+        .register_validated_zero_copy_listener(&source, None, first_registration.clone())
+        .await
+        .unwrap();
+    adapter
+        .register_validated_zero_copy_listener(&source, None, removed_registration.clone())
+        .await
+        .unwrap();
+    send_payload(
+        &adapter,
+        metadata(source.clone(), PayloadEncoding::RAW),
+        b"first",
+        8,
+    )
+    .await
+    .unwrap();
+    tokio::time::timeout(Duration::from_secs(2), first.entered.notified())
+        .await
+        .unwrap();
+    adapter
+        .unregister_validated_zero_copy_listener(&source, None, removed_registration)
+        .await
+        .unwrap();
+    first.resume.notify_one();
+    send_payload(
+        &adapter,
+        metadata(source.clone(), PayloadEncoding::RAW),
+        b"next",
+        8,
+    )
+    .await
+    .unwrap();
+    tokio::time::timeout(Duration::from_secs(2), first.next.notified())
+        .await
+        .unwrap();
+    assert!(
+        removed.0.lock().unwrap().is_empty(),
+        "removed callback must not begin from a poller snapshot"
+    );
+    adapter
+        .unregister_validated_zero_copy_listener(&source, None, first_registration)
+        .await
+        .unwrap();
+}
+
+#[cfg(all(feature = "test-stub", not(feature = "lola-ffi")))]
+#[tokio::test]
+async fn unregister_invalidates_already_snapshotted_callbacks() {
+    check_unregister_invalidates_pending_delivery(
+        UTransportLola::build(config("lola/r19/unregister-snapshot")).unwrap(),
+    )
+    .await;
+}
+
 #[async_trait]
 impl UZeroCopyListener<NativeLolaRx> for RecordingListener {
     async fn on_receive_zero_copy(&self, frame: NativeLolaRx) {
@@ -664,6 +749,108 @@ async fn native_listener_registration_precedes_provider_discovery() {
 }
 
 #[cfg(feature = "lola-ffi")]
+struct NativeProviderProcess(std::process::Child);
+
+#[cfg(feature = "lola-ffi")]
+impl Drop for NativeProviderProcess {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+#[cfg(feature = "lola-ffi")]
+#[tokio::test]
+#[ignore = "subprocess fixture for native_cross_process_first_sample"]
+async fn native_first_sample_provider_process() {
+    use std::io::Read;
+    if std::env::var_os("UP_LOLA_FIRST_SAMPLE_PROVIDER").is_none() {
+        return;
+    }
+    let producer = UTransportLola::build(native_config()).unwrap();
+    let wire = selected(&producer, UProtocolNativeWire);
+    send_payload(
+        &wire,
+        metadata(topic(0x9042), PayloadEncoding::RAW),
+        b"one cross-process sample",
+        8,
+    )
+    .await
+    .unwrap();
+    // Retain the offered event until the parent has observed the only sample.
+    std::io::stdin().read_exact(&mut [0]).unwrap();
+}
+
+#[cfg(feature = "lola-ffi")]
+#[tokio::test]
+#[ignore = "requires the native S-CORE LoLa runtime fixture"]
+async fn native_cross_process_first_sample() {
+    use std::io::Write;
+    let _guard = native_guard().await;
+    let consumer = UTransportLola::build(native_config()).unwrap();
+    let wire = selected(&consumer, UProtocolNativeWire);
+    let source = topic(0x9042);
+    let listener = Arc::new(RecordingListener::default());
+    let registration: Arc<dyn UZeroCopyListener<NativeLolaRx>> = listener.clone();
+    wire.register_validated_zero_copy_listener(&source, None, registration.clone())
+        .await
+        .unwrap();
+    // A distinct process offers only after local registration; no repeated send
+    // or process-local registry can establish delivery of this first sample.
+    let mut provider = NativeProviderProcess(
+        std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "native_first_sample_provider_process",
+                "--ignored",
+                "--nocapture",
+            ])
+            .env("UP_LOLA_FIRST_SAMPLE_PROVIDER", "1")
+            .stdin(std::process::Stdio::piped())
+            .spawn()
+            .unwrap(),
+    );
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if !listener.0.lock().unwrap().is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("one sample must survive discovery across processes");
+    assert_eq!(
+        listener.0.lock().unwrap().as_slice(),
+        [b"one cross-process sample".to_vec()]
+    );
+    wire.unregister_validated_zero_copy_listener(&source, None, registration)
+        .await
+        .unwrap();
+    provider.0.stdin.take().unwrap().write_all(b"x").unwrap();
+    let exit = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let Some(exit) = provider.0.try_wait().unwrap() {
+                break exit;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("provider must exit");
+    assert!(exit.success());
+}
+
+#[cfg(feature = "lola-ffi")]
+#[tokio::test]
+#[ignore = "requires the native S-CORE LoLa runtime fixture"]
+async fn native_unregister_invalidates_already_snapshotted_callbacks() {
+    let _guard = native_guard().await;
+    check_unregister_invalidates_pending_delivery(UTransportLola::build(native_config()).unwrap())
+        .await;
+}
+
+#[cfg(feature = "lola-ffi")]
 #[tokio::test]
 #[ignore = "requires the native S-CORE LoLa runtime fixture"]
 async fn native_broad_rpc_request_listener_honors_primary_default_channel() {
@@ -825,4 +1012,160 @@ async fn native_mismatched_pull_sample_is_retained_for_a_later_filter() {
         first_frame.try_contiguous_payload(),
         Some(b"first-native".as_slice())
     );
+}
+
+#[cfg(feature = "lola-ffi")]
+struct RetainingListener(tokio::sync::mpsc::UnboundedSender<NativeLolaRx>);
+
+#[cfg(feature = "lola-ffi")]
+#[async_trait]
+impl UZeroCopyListener<NativeLolaRx> for RetainingListener {
+    async fn on_receive_zero_copy(&self, frame: NativeLolaRx) {
+        let _ = self.0.send(frame);
+    }
+}
+
+#[cfg(feature = "lola-ffi")]
+#[tokio::test]
+#[ignore = "requires the native S-CORE LoLa runtime fixture"]
+async fn native_pull_lease_owns_storage_after_transport_drop() {
+    let _guard = native_guard().await;
+    let core = UTransportLola::build(native_config()).unwrap();
+    let adapter = selected(&core, UProtocolNativeWire);
+    let source = topic(0x9016);
+    send_payload(
+        &adapter,
+        metadata(source.clone(), PayloadEncoding::RAW),
+        b"retained-pull",
+        8,
+    )
+    .await
+    .unwrap();
+    let frame = receive_with_retry(&adapter, &source).await.unwrap();
+    let payload_address = frame.try_contiguous_payload().unwrap().as_ptr();
+    let metadata_address = frame.raw().encoded_metadata().as_ptr();
+    drop(adapter);
+    drop(core);
+    assert_eq!(frame.try_contiguous_payload().unwrap(), b"retained-pull");
+    assert_eq!(
+        frame.try_contiguous_payload().unwrap().as_ptr(),
+        payload_address
+    );
+    assert_eq!(frame.raw().encoded_metadata().as_ptr(), metadata_address);
+    assert_eq!(frame.metadata().source(), &source);
+    assert_eq!(
+        frame
+            .raw()
+            .loaned_contiguous_payload()
+            .unwrap()
+            .provenance(),
+        PayloadLoanProvenance::OpaqueTransportLoan
+    );
+    drop(frame);
+}
+
+#[cfg(feature = "lola-ffi")]
+#[tokio::test]
+#[ignore = "requires the native S-CORE LoLa runtime fixture"]
+async fn native_listener_leases_outlive_unregister_and_both_transports() {
+    let _guard = native_guard().await;
+    let consumer = UTransportLola::build(native_config()).unwrap();
+    let consumer_wire = selected(&consumer, UProtocolNativeWire);
+    let source = topic(0x9017);
+    let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    let listener: Arc<dyn UZeroCopyListener<NativeLolaRx>> = Arc::new(RetainingListener(sender));
+    consumer_wire
+        .register_validated_zero_copy_listener(&source, None, listener.clone())
+        .await
+        .unwrap();
+    let producer = UTransportLola::build(native_config()).unwrap();
+    let producer_wire = selected(&producer, UProtocolNativeWire);
+    send_payload(
+        &producer_wire,
+        metadata(source.clone(), PayloadEncoding::RAW),
+        b"first-held",
+        8,
+    )
+    .await
+    .unwrap();
+    let first = tokio::time::timeout(Duration::from_secs(2), receiver.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    send_payload(
+        &producer_wire,
+        metadata(source.clone(), PayloadEncoding::RAW),
+        b"second-held",
+        8,
+    )
+    .await
+    .unwrap();
+    let second = tokio::time::timeout(Duration::from_secs(2), receiver.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    let first_address = first.try_contiguous_payload().unwrap().as_ptr();
+    let second_address = second.try_contiguous_payload().unwrap().as_ptr();
+    consumer_wire
+        .unregister_validated_zero_copy_listener(&source, None, listener)
+        .await
+        .unwrap();
+    drop(consumer_wire);
+    drop(consumer);
+    drop(producer_wire);
+    drop(producer);
+    assert_eq!(first.try_contiguous_payload().unwrap(), b"first-held");
+    assert_eq!(second.try_contiguous_payload().unwrap(), b"second-held");
+    assert_eq!(
+        first.try_contiguous_payload().unwrap().as_ptr(),
+        first_address
+    );
+    assert_eq!(
+        second.try_contiguous_payload().unwrap().as_ptr(),
+        second_address
+    );
+    drop(first);
+    assert_eq!(second.try_contiguous_payload().unwrap(), b"second-held");
+    drop(second);
+}
+
+#[cfg(feature = "lola-ffi")]
+#[tokio::test]
+#[ignore = "requires the native S-CORE LoLa runtime fixture"]
+async fn native_tx_loan_owns_storage_after_producer_drop() {
+    let _guard = native_guard().await;
+    let core = UTransportLola::build(native_config()).unwrap();
+    let adapter = selected(&core, UProtocolNativeWire);
+    let spec = UTxLoanSpec::payload(metadata(topic(0x9018), PayloadEncoding::RAW), 8, 8).unwrap();
+    let mut loan = adapter.loan_validated_tx(spec).await.unwrap();
+    loan.payload_mut().copy_from_slice(b"before!!");
+    let address = loan.payload().as_ptr();
+    drop(adapter);
+    drop(core);
+    assert_eq!(loan.payload(), b"before!!");
+    loan.payload_mut().copy_from_slice(b"after!!!");
+    assert_eq!(loan.payload(), b"after!!!");
+    assert_eq!(loan.payload().as_ptr(), address);
+    drop(loan);
+}
+
+#[cfg(feature = "lola-ffi")]
+#[tokio::test]
+#[ignore = "requires the native S-CORE LoLa runtime fixture"]
+async fn native_uninit_tx_loan_keeps_owner_through_initialization_after_drop() {
+    let _guard = native_guard().await;
+    let core = UTransportLola::build(native_config()).unwrap();
+    let adapter = selected(&core, UProtocolNativeWire);
+    let spec = UTxLoanSpec::payload(metadata(topic(0x9019), PayloadEncoding::RAW), 8, 8).unwrap();
+    let mut loan = adapter.loan_validated_uninit_tx(spec).await.unwrap();
+    drop(adapter);
+    drop(core);
+    for (slot, byte) in loan.payload_uninit_mut().iter_mut().zip(*b"retained") {
+        slot.write(byte);
+    }
+    // SAFETY: Every byte of the exact eight-byte payload was initialized above;
+    // the transport initialized framing and padding when the native loan was made.
+    let initialized = unsafe { loan.assume_payload_initialized() };
+    assert_eq!(initialized.payload(), b"retained");
+    drop(initialized);
 }

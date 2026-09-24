@@ -26,6 +26,7 @@ use crate::sys::{NativeSubscriber, NativeTransport};
 use crate::{
     config::{LolaDefaultRxChannel, LolaPullMismatchQueueFullPolicy, LolaTransportConfig},
     frame::{LolaRxLease, LolaTxChannel, LolaTxLoan, LolaUninitTxLoan},
+    listener_activity::ListenerActivity,
 };
 
 /// Zero-copy uProtocol transport backed by a LoLa generic event.
@@ -47,6 +48,7 @@ pub struct UTransportLola {
     default_rx_channel: LolaDefaultRxChannel,
     self_ref: Weak<UTransportLola>,
     listeners: Mutex<Vec<ListenerRegistration>>,
+    listener_lifecycle: Mutex<()>,
     listener_task: Mutex<Option<JoinHandle<()>>>,
     #[cfg(all(feature = "test-stub", not(feature = "lola-ffi")))]
     pending: Mutex<VecDeque<LolaRxLease>>,
@@ -118,6 +120,7 @@ impl UTransportLola {
             default_rx_channel,
             self_ref: self_ref.clone(),
             listeners: Mutex::new(Vec::new()),
+            listener_lifecycle: Mutex::new(()),
             listener_task: Mutex::new(None),
             #[cfg(all(feature = "test-stub", not(feature = "lola-ffi")))]
             pending: Mutex::new(VecDeque::new()),
@@ -348,8 +351,15 @@ impl UTransportLola {
                     tokio::time::sleep(Duration::from_millis(10)).await;
                 }
                 Ok(deliveries) => {
-                    for (listener, frame) in deliveries {
-                        listener.on_receive_encoded_zero_copy(frame).await;
+                    for delivery in deliveries {
+                        delivery
+                            .active
+                            .dispatch(|| {
+                                delivery
+                                    .listener
+                                    .on_receive_encoded_zero_copy(delivery.frame)
+                            })
+                            .await;
                     }
                 }
                 Err(status) if status.code() == UCode::NotFound => {
@@ -365,9 +375,7 @@ impl UTransportLola {
         }
     }
 
-    async fn poll_listener_frames(
-        &self,
-    ) -> Result<Vec<(Arc<dyn UEncodedZeroCopyListener<LolaRxLease>>, LolaRxLease)>, UStatus> {
+    async fn poll_listener_frames(&self) -> Result<Vec<ListenerDelivery>, UStatus> {
         #[cfg(all(feature = "test-stub", not(feature = "lola-ffi")))]
         {
             let (listeners, channels) = {
@@ -384,6 +392,7 @@ impl UTransportLola {
                             Arc::clone(&registration.listener),
                             registration.source_filter.clone(),
                             registration.sink_filter.clone(),
+                            Arc::clone(&registration.active),
                         )
                     })
                     .collect::<Vec<_>>();
@@ -393,9 +402,13 @@ impl UTransportLola {
                 return Ok(Vec::new());
             };
             let mut deliveries = Vec::new();
-            for (listener, source_filter, sink_filter) in listeners {
+            for (listener, source_filter, sink_filter, active) in listeners {
                 if frame_matches(&frame, &source_filter, sink_filter.as_ref()) {
-                    deliveries.push((listener, frame.clone_for_stub()?));
+                    deliveries.push(ListenerDelivery {
+                        listener,
+                        active,
+                        frame: frame.clone_for_stub()?,
+                    });
                 }
             }
             Ok(deliveries)
@@ -418,7 +431,11 @@ impl UTransportLola {
                         Ok(sample) => {
                             let frame = LolaRxLease::from_native(sample)?;
                             if registration.matches_frame(&frame) {
-                                deliveries.push((Arc::clone(&registration.listener), frame));
+                                deliveries.push(ListenerDelivery {
+                                    listener: Arc::clone(&registration.listener),
+                                    active: Arc::clone(&registration.active),
+                                    frame,
+                                });
                             }
                         }
                         Err(status) if status.code() == UCode::NotFound => {}
@@ -522,11 +539,18 @@ pub struct LolaPullMismatchQueueDiagnostics {
     pub last_mismatch_reason: Option<String>,
 }
 
+struct ListenerDelivery {
+    listener: Arc<dyn UEncodedZeroCopyListener<LolaRxLease>>,
+    active: Arc<ListenerActivity>,
+    frame: LolaRxLease,
+}
+
 struct ListenerRegistration {
     source_filter: UUri,
     sink_filter: Option<UUri>,
     channels: LolaRxChannels,
     listener: Arc<dyn UEncodedZeroCopyListener<LolaRxLease>>,
+    active: Arc<ListenerActivity>,
     #[cfg(feature = "lola-ffi")]
     subscriber: Option<NativeSubscriber>,
     #[cfg(feature = "lola-ffi")]
@@ -545,6 +569,7 @@ impl ListenerRegistration {
             sink_filter: sink_filter.map(ToOwned::to_owned),
             channels,
             listener,
+            active: Arc::new(ListenerActivity::new()),
             #[cfg(feature = "lola-ffi")]
             subscriber: None,
             #[cfg(feature = "lola-ffi")]
@@ -626,6 +651,9 @@ impl Drop for UTransportLola {
     fn drop(&mut self) {
         if let Some(task) = self.listener_task.get_mut().take() {
             task.abort();
+        }
+        for registration in self.listeners.get_mut().iter() {
+            registration.active.cancel();
         }
         self.listeners.get_mut().clear();
         self.subscriber.get_mut().take();
@@ -754,6 +782,7 @@ impl UZeroCopyTransportCore for UTransportLola {
         sink_filter: Option<&UUri>,
         listener: Arc<dyn UEncodedZeroCopyListener<Self::Rx>>,
     ) -> Result<(), UStatus> {
+        let _lifecycle = self.listener_lifecycle.lock().await;
         {
             let mut listeners = self.listeners.lock().await;
             if listeners.iter().any(|registration| {
@@ -781,6 +810,7 @@ impl UZeroCopyTransportCore for UTransportLola {
         sink_filter: Option<&UUri>,
         listener: Arc<dyn UEncodedZeroCopyListener<Self::Rx>>,
     ) -> Result<(), UStatus> {
+        let _lifecycle = self.listener_lifecycle.lock().await;
         let should_stop = {
             let mut listeners = self.listeners.lock().await;
             let Some(index) = listeners.iter().position(|registration| {
@@ -791,12 +821,17 @@ impl UZeroCopyTransportCore for UTransportLola {
                     "no such LoLa listener registered for filters",
                 ));
             };
+            listeners[index].active.stop().await;
             listeners.remove(index);
             listeners.is_empty()
         };
         if should_stop {
             if let Some(task) = self.listener_task.lock().await.take() {
+                let unregistering_from_callback = tokio::task::try_id() == Some(task.id());
                 task.abort();
+                if !unregistering_from_callback {
+                    let _ = task.await;
+                }
             }
         }
         Ok(())

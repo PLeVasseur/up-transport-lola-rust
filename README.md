@@ -252,6 +252,20 @@ region with stronger `PayloadLoanProvenance::SharedMemory` semantics.
 
 The bridge separates provider and subscriber ownership. `NativeTransport` owns the `GenericSkeleton`/`GenericSkeletonEvent` path used for `Allocate` and `Send`; each direct receive path or registered listener owns a separate `GenericProxy`/`GenericProxyEvent` subscription. This mirrors the S-CORE Rust binding model and lets a local listener and a streamer listener receive the same LoLa event through independent subscription queues.
 
+TX loans retain their native allocator owner, and RX leases retain their native
+subscriber/proxy owner. Unregistering a listener or dropping a transport handle
+does not revoke outstanding buffers: native entities are destroyed only after
+their final loan/sample is released. This includes uninitialized TX buffers and
+metadata views. Applications need no copy-before-unregister workaround. Real native
+tests hold the original addresses across unregister and transport destruction.
+
+Listener registration establishes local dispatch intent and may precede provider
+discovery; it is not a claim that a remote provider already exists. Unregister
+invalidates not-yet-entered deliveries already collected by the poller. When the
+last listener is removed from outside its callback, its aborted worker is joined.
+An already-entered callback may finish; self-unregister does not wait on its own
+task. Concurrent registration is serialized with worker replacement.
+
 TX loan wrappers and RX sample wrappers are drawn from bounded C++ owner pools
 sized by `max_samples`. The native bridge does not allocate or delete per-sample
 wrapper objects on the loan/receive happy path; pool exhaustion maps to

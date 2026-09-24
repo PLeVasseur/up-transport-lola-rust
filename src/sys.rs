@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  ********************************************************************************/
 
-use std::{mem::MaybeUninit, ptr::NonNull, slice};
+use std::{mem::MaybeUninit, ptr::NonNull, slice, sync::Arc};
 
 use up_rust::{UCode, UStatus};
 
@@ -135,20 +135,24 @@ unsafe extern "C" {
 }
 
 pub(crate) struct NativeTransport {
-    ptr: NonNull<UpLolaTransport>,
+    owner: Arc<NativeTransportHandle>,
     sample_size: usize,
     sample_alignment: usize,
+}
+
+struct NativeTransportHandle {
+    ptr: NonNull<UpLolaTransport>,
 }
 
 // SAFETY: The native bridge contract treats `UpLolaTransport` handles as
 // thread-safe transport objects. Rust only stores and forwards the opaque
 // non-null handle; synchronization and callback/thread affinity are external
 // native obligations, not Rust-level guarantees proven by this crate.
-unsafe impl Send for NativeTransport {}
-// SAFETY: Shared references to `NativeTransport` only call bridge functions that
+unsafe impl Send for NativeTransportHandle {}
+// SAFETY: Shared references to `NativeTransportHandle` only call bridge functions that
 // accept the opaque handle and perform their own synchronization per the native
 // bridge contract.
-unsafe impl Sync for NativeTransport {}
+unsafe impl Sync for NativeTransportHandle {}
 
 impl NativeTransport {
     pub(crate) fn new(config: &LolaTransportConfig) -> Result<Self, UStatus> {
@@ -163,7 +167,7 @@ impl NativeTransport {
             UStatus::fail_with_code(UCode::Internal, "LoLa bridge returned null transport")
         })?;
         Ok(Self {
-            ptr,
+            owner: Arc::new(NativeTransportHandle { ptr }),
             sample_size: config.sample_size,
             sample_alignment: config.sample_alignment,
         })
@@ -171,42 +175,52 @@ impl NativeTransport {
 
     pub(crate) fn loan_sample(&self) -> Result<NativeTxLoan, UStatus> {
         let mut out = std::ptr::null_mut();
-        // SAFETY: `self.ptr` is a live bridge handle owned by this wrapper, and
+        // SAFETY: `self.owner` retains the live bridge handle, and
         // `out` is a valid out-parameter for one TX loan handle.
-        let status = unsafe { up_lola_transport_reserve(self.ptr.as_ptr(), &raw mut out) };
+        let status = unsafe { up_lola_transport_reserve(self.owner.ptr.as_ptr(), &raw mut out) };
         map_status(status, "loan LoLa sample")?;
-        NativeTxLoan::new(out, self.sample_size, self.sample_alignment)
+        NativeTxLoan::new(
+            out,
+            self.sample_size,
+            self.sample_alignment,
+            Arc::clone(&self.owner),
+        )
     }
 
     pub(crate) fn send(&self, mut loan: NativeTxLoan) -> Result<(), UStatus> {
         let raw = loan.take();
         // SAFETY: `raw` is an owned TX loan handle consumed exactly once by the
-        // bridge send call; `self.ptr` is a live transport handle.
-        let status = unsafe { up_lola_transport_send(self.ptr.as_ptr(), raw.as_ptr()) };
+        // bridge send call; `self.owner` retains the live transport handle.
+        let status = unsafe { up_lola_transport_send(self.owner.ptr.as_ptr(), raw.as_ptr()) };
         map_status(status, "send LoLa sample")
     }
 }
 
-impl Drop for NativeTransport {
+impl Drop for NativeTransportHandle {
     fn drop(&mut self) {
         // SAFETY: `self.ptr` is the live transport handle owned by this wrapper
-        // and is destroyed exactly once from `Drop`.
+        // and is destroyed exactly once after the transport and all TX loans
+        // have released their shared ownership.
         unsafe { up_lola_transport_destroy(self.ptr.as_ptr()) }
     }
 }
 
 pub(crate) struct NativeSubscriber {
-    ptr: NonNull<UpLolaSubscriber>,
+    owner: Arc<NativeSubscriberHandle>,
     sample_size: usize,
     sample_alignment: usize,
 }
 
+struct NativeSubscriberHandle {
+    ptr: NonNull<UpLolaSubscriber>,
+}
+
 // SAFETY: The native bridge treats subscriber handles as thread-safe opaque
 // objects; Rust only forwards the non-null handle to bridge calls.
-unsafe impl Send for NativeSubscriber {}
+unsafe impl Send for NativeSubscriberHandle {}
 // SAFETY: Shared references call bridge functions that must synchronize access
 // internally according to the LoLa bridge contract.
-unsafe impl Sync for NativeSubscriber {}
+unsafe impl Sync for NativeSubscriberHandle {}
 
 impl NativeSubscriber {
     pub(crate) fn new(config: &LolaTransportConfig) -> Result<Self, UStatus> {
@@ -220,7 +234,7 @@ impl NativeSubscriber {
             UStatus::fail_with_code(UCode::Internal, "LoLa bridge returned null subscriber")
         })?;
         Ok(Self {
-            ptr,
+            owner: Arc::new(NativeSubscriberHandle { ptr }),
             sample_size: config.sample_size,
             sample_alignment: config.sample_alignment,
         })
@@ -228,18 +242,24 @@ impl NativeSubscriber {
 
     pub(crate) fn receive(&self) -> Result<NativeRxSample, UStatus> {
         let mut out = std::ptr::null_mut();
-        // SAFETY: `self.ptr` is a live subscriber handle and `out` is a valid
+        // SAFETY: `self.owner` retains the live subscriber handle and `out` is a valid
         // out-parameter for one received sample handle.
-        let status = unsafe { up_lola_subscriber_receive(self.ptr.as_ptr(), &raw mut out) };
+        let status = unsafe { up_lola_subscriber_receive(self.owner.ptr.as_ptr(), &raw mut out) };
         map_status(status, "receive LoLa sample")?;
-        NativeRxSample::new(out, self.sample_size, self.sample_alignment)
+        NativeRxSample::new(
+            out,
+            self.sample_size,
+            self.sample_alignment,
+            Arc::clone(&self.owner),
+        )
     }
 }
 
-impl Drop for NativeSubscriber {
+impl Drop for NativeSubscriberHandle {
     fn drop(&mut self) {
         // SAFETY: `self.ptr` is the live subscriber handle owned by this wrapper
-        // and is destroyed exactly once from `Drop`.
+        // and is destroyed exactly once after both registration/pull ownership
+        // and every received sample are released. The proxy must outlive SamplePtr.
         unsafe { up_lola_subscriber_destroy(self.ptr.as_ptr()) }
     }
 }
@@ -248,6 +268,8 @@ pub(crate) struct NativeTxLoan {
     ptr: Option<NonNull<UpLolaTxLoan>>,
     expected_len: usize,
     expected_alignment: usize,
+    // Released after Drop returns the native sample to its originating skeleton.
+    _owner: Arc<NativeTransportHandle>,
 }
 
 // SAFETY: TX loan ownership moves between threads only as an opaque handle; the
@@ -259,6 +281,7 @@ impl NativeTxLoan {
         ptr: *mut UpLolaTxLoan,
         expected_len: usize,
         expected_alignment: usize,
+        owner: Arc<NativeTransportHandle>,
     ) -> Result<Self, UStatus> {
         let ptr = NonNull::new(ptr).ok_or_else(|| {
             UStatus::fail_with_code(UCode::Internal, "LoLa bridge returned null TX loan")
@@ -267,6 +290,7 @@ impl NativeTxLoan {
             ptr: Some(ptr),
             expected_len,
             expected_alignment,
+            _owner: owner,
         };
         loan.data_parts("LoLa TX loan")?;
         Ok(loan)
@@ -369,6 +393,9 @@ pub(crate) struct NativeRxSample {
     ptr: NonNull<UpLolaRxSample>,
     expected_len: usize,
     expected_alignment: usize,
+    // Retains the proxy, not merely the pooled sample-handle allocation. Rust
+    // runs Drop before releasing this field, so SamplePtr is returned first.
+    _owner: Arc<NativeSubscriberHandle>,
 }
 
 // SAFETY: RX sample ownership moves as an opaque handle; the bridge owns the
@@ -380,6 +407,7 @@ impl NativeRxSample {
         ptr: *mut UpLolaRxSample,
         expected_len: usize,
         expected_alignment: usize,
+        owner: Arc<NativeSubscriberHandle>,
     ) -> Result<Self, UStatus> {
         let ptr = NonNull::new(ptr).ok_or_else(|| {
             UStatus::fail_with_code(UCode::Internal, "LoLa bridge returned null RX sample")
@@ -388,6 +416,7 @@ impl NativeRxSample {
             ptr,
             expected_len,
             expected_alignment,
+            _owner: owner,
         };
         sample.data_parts("LoLa RX sample")?;
         Ok(sample)
@@ -410,8 +439,9 @@ impl NativeRxSample {
         // SAFETY:
         // - `data_parts` rejected null pointers, lengths other than the configured
         //   sample size, and pointers that do not satisfy the configured sample alignment.
-        // - The bridge guarantees the returned sample data pointer is valid for `len`
-        //   initialized `u8` elements for the lifetime of this RX sample wrapper.
+        // - `_owner` retains the native subscriber/proxy for this sample's entire
+        //   lifetime, including after listener unregister or transport drop.
+        // - The bridge supplies `len` initialized bytes until this sample is released.
         // - Per https://doc.rust-lang.org/stable/std/slice/fn.from_raw_parts.html#safety:
         //
         //   "`data` must point to `len` consecutive properly initialized values

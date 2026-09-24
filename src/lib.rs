@@ -43,6 +43,7 @@ compile_error!(
 
 mod config;
 mod frame;
+mod listener_activity;
 #[cfg(feature = "benchmark-owned")]
 mod owned_benchmark;
 mod transport;
