@@ -16,6 +16,7 @@ use async_trait::async_trait;
 use tokio::{sync::Mutex, task::JoinHandle};
 use up_rust::selected_wire_user_api::{UNativePrefixWireTransport, UWithNativePrefixWire};
 use up_rust::wire_implementer_api::UWire;
+use up_rust::ListenerAdmission;
 use up_rust::{
     FrameMessageKind, PreparedTxLoanSpec, UCode, UEncodedZeroCopyListener, UStatus, UUri,
     UZeroCopyTransportCore, UZeroCopyUninitTransportCore,
@@ -26,7 +27,6 @@ use crate::sys::{NativeSubscriber, NativeTransport};
 use crate::{
     config::{LolaDefaultRxChannel, LolaPullMismatchQueueFullPolicy, LolaTransportConfig},
     frame::{LolaRxLease, LolaTxChannel, LolaTxLoan, LolaUninitTxLoan},
-    listener_activity::ListenerActivity,
 };
 
 /// Zero-copy uProtocol transport backed by a LoLa generic event.
@@ -541,7 +541,7 @@ pub struct LolaPullMismatchQueueDiagnostics {
 
 struct ListenerDelivery {
     listener: Arc<dyn UEncodedZeroCopyListener<LolaRxLease>>,
-    active: Arc<ListenerActivity>,
+    active: Arc<ListenerAdmission>,
     frame: LolaRxLease,
 }
 
@@ -550,7 +550,7 @@ struct ListenerRegistration {
     sink_filter: Option<UUri>,
     channels: LolaRxChannels,
     listener: Arc<dyn UEncodedZeroCopyListener<LolaRxLease>>,
-    active: Arc<ListenerActivity>,
+    active: Arc<ListenerAdmission>,
     #[cfg(feature = "lola-ffi")]
     subscriber: Option<NativeSubscriber>,
     #[cfg(feature = "lola-ffi")]
@@ -569,7 +569,7 @@ impl ListenerRegistration {
             sink_filter: sink_filter.map(ToOwned::to_owned),
             channels,
             listener,
-            active: Arc::new(ListenerActivity::new()),
+            active: Arc::new(ListenerAdmission::new()),
             #[cfg(feature = "lola-ffi")]
             subscriber: None,
             #[cfg(feature = "lola-ffi")]
