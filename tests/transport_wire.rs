@@ -129,9 +129,20 @@ async fn receive_with_retry<W>(
 where
     W: UWire + Send + Sync + 'static,
 {
+    receive_with_sink_retry(transport, source, None).await
+}
+
+async fn receive_with_sink_retry<W>(
+    transport: &LolaWireTransport<W>,
+    source: &UUri,
+    sink: Option<&UUri>,
+) -> Result<<LolaWireTransport<W> as UZeroCopyTransportImpl>::Rx, UStatus>
+where
+    W: UWire + Send + Sync + 'static,
+{
     let mut last = None;
     for _ in 0..50 {
-        match transport.receive_validated_zero_copy(source, None).await {
+        match transport.receive_validated_zero_copy(source, sink).await {
             Ok(frame) => return Ok(frame),
             Err(error) if error.code() == UCode::NotFound => {
                 last = Some(error);
@@ -960,7 +971,9 @@ async fn native_dual_rpc_channels_use_separate_lola_events() {
     .await
     .unwrap();
 
-    let frame = receive_with_retry(&selected, &method).await.unwrap();
+    let frame = receive_with_sink_retry(&selected, &method, Some(&reply_to))
+        .await
+        .unwrap();
     assert_eq!(
         frame.try_contiguous_payload(),
         Some(b"native-response".as_slice())
