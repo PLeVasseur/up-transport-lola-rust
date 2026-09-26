@@ -1,4 +1,4 @@
-name: Benchmark Guardrail Advisory
+name: Benchmark regression report
 
 on:
   pull_request:

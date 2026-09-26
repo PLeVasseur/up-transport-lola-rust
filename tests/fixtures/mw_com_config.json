@@ -18,6 +18,25 @@
           ]
         }
       ]
+    },
+    {
+      "serviceTypeName": "/uprotocol/TransportResponse",
+      "version": {
+        "major": 1,
+        "minor": 0
+      },
+      "bindings": [
+        {
+          "binding": "SHM",
+          "serviceId": 6241,
+          "events": [
+            {
+              "eventName": "frameResponse",
+              "eventId": 1
+            }
+          ]
+        }
+      ]
     }
   ],
   "serviceInstances": [
@@ -36,6 +55,29 @@
           "events": [
             {
               "eventName": "frame",
+              "numberOfSampleSlots": 8,
+              "maxSubscribers": 4,
+              "numberOfIpcTracingSlots": 0
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "instanceSpecifier": "uprotocol/transportResponse",
+      "serviceTypeName": "/uprotocol/TransportResponse",
+      "version": {
+        "major": 1,
+        "minor": 0
+      },
+      "instances": [
+        {
+          "instanceId": 2,
+          "asil-level": "QM",
+          "binding": "SHM",
+          "events": [
+            {
+              "eventName": "frameResponse",
               "numberOfSampleSlots": 8,
               "maxSubscribers": 4,
               "numberOfIpcTracingSlots": 0

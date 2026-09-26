@@ -5,46 +5,14 @@
  ********************************************************************************/
 
 use up_rust::{
-    zero_copy::{UFrameView, ULoanedContiguousZeroCopyRxFrame, UZeroCopyTransport},
-    UCode, UUri,
+    UCode, UFrameView, ULoanedContiguousZeroCopyRxFrame, UUri, UWithNativePrefixWire,
+    UZeroCopyTransportImpl,
 };
 use up_transport_lola_rust::{LolaTransportConfig, UTransportLola};
 
-#[repr(C)]
-#[derive(
-    Clone,
-    Copy,
-    Debug,
-    Eq,
-    PartialEq,
-    up_rust::StablePayload,
-    up_rust::ByteBackedStablePayload,
-    up_rust::StablePayloadInit,
-)]
-#[stable_payload(type_name = "org.eclipse.uprotocol.transport.example.NoZeroSensorHeader")]
-struct NoZeroSensorHeader {
-    case_id: u32,
-    sequence: u32,
-    logical_payload_len: u32,
-}
-
-#[repr(C)]
-#[derive(
-    Clone,
-    Copy,
-    Debug,
-    Eq,
-    PartialEq,
-    up_rust::StablePayload,
-    up_rust::ByteBackedStablePayload,
-    up_rust::StablePayloadInit,
-)]
-#[stable_payload(type_name = "org.eclipse.uprotocol.transport.example.NoZeroSensorFrame")]
-struct NoZeroSensorFrame {
-    header: NoZeroSensorHeader,
-    checksum: u32,
-    payload: [u8; 4096],
-}
+#[path = "support/sensor_profile.rs"]
+mod sensor_profile;
+use sensor_profile::NoZeroSensorFrame;
 
 fn config() -> LolaTransportConfig {
     LolaTransportConfig {
@@ -81,12 +49,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config = config();
     let authority = config.local_authority.clone();
     let transport = UTransportLola::build(config)?;
+    let profile = sensor_profile::agreed_profile()?;
+    let transport = transport
+        .zero_copy_core()
+        .into_stable_container_transport(profile);
     let source_filter = UUri::try_from_parts(&authority, 0x4210, 1, 0x9000)?;
 
     loop {
-        match transport.receive_zero_copy(&source_filter, None).await {
+        match transport
+            .receive_validated_zero_copy(&source_filter, None)
+            .await
+        {
             Ok(frame) => {
-                let sensor_frame = frame.borrow_stable_payload::<NoZeroSensorFrame>()?;
+                let sensor_frame = frame.borrow_payload::<NoZeroSensorFrame>()?;
                 println!(
                     "Received LoLa no-zero stable sensor frame [source: {}, loan provenance: {:?}, sequence: {}, first payload byte: {}]",
                     frame.metadata().source().to_uri(false),
@@ -95,7 +70,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     sensor_frame.payload[0]
                 );
             }
-            Err(status) if status.get_code() == UCode::NOT_FOUND => {
+            Err(status) if status.code() == UCode::NotFound => {
                 tokio::time::sleep(core::time::Duration::from_millis(10)).await;
             }
             Err(status) => return Err(status.into()),

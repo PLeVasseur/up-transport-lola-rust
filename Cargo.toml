@@ -13,7 +13,7 @@ build = "build.rs"
 [features]
 default = ["bundled"]
 bundled = ["lola-build-from-source"]
-benchmark-owned = []
+benchmark-owned = ["up-rust/owned-frame-transport"]
 lola-ffi = []
 lola-build-from-source = ["lola-ffi"]
 payload-contract-benchmarks = ["up-rust/payload-contract-fixtures"]
@@ -31,14 +31,17 @@ required-features = ["benchmark-owned"]
 [dependencies]
 async-trait = "0.1"
 tokio = { version = "1.45.1", default-features = false, features = ["rt", "sync", "time"] }
-up-rust = { git = "https://github.com/PLeVasseur/up-rust.git", rev = "2fe440f93cb66d6c7a24b953cc26fd5670a1ad71" }
+up-rust = { version = "=0.10.0-SNAPSHOT", git = "https://github.com/PLeVasseur/up-rust.git", rev = "4c786f83fd03f22ba4e7a4e9af0846ae79ecf852", default-features = false, features = ["protobuf-wire", "selected-wire-user-api", "transport-implementer-api", "wire-implementer-api", "zero-copy-transport", "util"] }
 
 [dev-dependencies]
 criterion = { version = "0.5.1", features = ["csv_output"] }
+# Addresses https://rustsec.org/advisories/RUSTSEC-2026-0204.
+crossbeam-epoch = "0.9.20"
 protobuf = { version = "3.7.2", features = ["with-bytes"] }
 serde_json = "1.0.145"
-tokio = { version = "1.45.1", default-features = false, features = ["macros", "rt"] }
-up-rust = { git = "https://github.com/PLeVasseur/up-rust.git", rev = "2fe440f93cb66d6c7a24b953cc26fd5670a1ad71", features = ["protobuf-wire", "test-util"] }
+tokio = { version = "1.45.1", default-features = false, features = ["macros", "rt", "rt-multi-thread"] }
+up-rust = { version = "=0.10.0-SNAPSHOT", git = "https://github.com/PLeVasseur/up-rust.git", rev = "4c786f83fd03f22ba4e7a4e9af0846ae79ecf852", features = ["protobuf-wire", "test-util"] }
+up-wire-xcdrv2 = { version = "=0.0.0", git = "https://github.com/PLeVasseur/up-wire-xcdrv2-rust.git", rev = "4887f808dd8d91e8d033ca13e10da4cce6e4a521" }
 
 [package.metadata.docs.rs]
 no-default-features = true

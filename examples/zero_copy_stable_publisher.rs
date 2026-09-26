@@ -4,44 +4,12 @@
  * SPDX-License-Identifier: Apache-2.0
  ********************************************************************************/
 
-use up_rust::{zero_copy::UZeroCopyUninitTransportExt, UFrameMetadata, UUri};
+use up_rust::{StableContainerPayload, UFrameMetadata, UUri, UWithNativePrefixWire};
 use up_transport_lola_rust::{LolaTransportConfig, UTransportLola};
 
-#[repr(C)]
-#[derive(
-    Clone,
-    Copy,
-    Debug,
-    Eq,
-    PartialEq,
-    up_rust::StablePayload,
-    up_rust::ByteBackedStablePayload,
-    up_rust::StablePayloadInit,
-)]
-#[stable_payload(type_name = "org.eclipse.uprotocol.transport.example.NoZeroSensorHeader")]
-struct NoZeroSensorHeader {
-    case_id: u32,
-    sequence: u32,
-    logical_payload_len: u32,
-}
-
-#[repr(C)]
-#[derive(
-    Clone,
-    Copy,
-    Debug,
-    Eq,
-    PartialEq,
-    up_rust::StablePayload,
-    up_rust::ByteBackedStablePayload,
-    up_rust::StablePayloadInit,
-)]
-#[stable_payload(type_name = "org.eclipse.uprotocol.transport.example.NoZeroSensorFrame")]
-struct NoZeroSensorFrame {
-    header: NoZeroSensorHeader,
-    checksum: u32,
-    payload: [u8; 4096],
-}
+#[path = "support/sensor_profile.rs"]
+mod sensor_profile;
+use sensor_profile::{NoZeroSensorFrame, NoZeroSensorHeader};
 
 fn config() -> LolaTransportConfig {
     LolaTransportConfig {
@@ -78,6 +46,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config = config();
     let authority = config.local_authority.clone();
     let transport = UTransportLola::build(config)?;
+    let profile = sensor_profile::agreed_profile()?;
+    let transport = transport
+        .zero_copy_core()
+        .into_stable_container_transport(profile.clone());
     let topic = UUri::try_from_parts(&authority, 0x4210, 1, 0x9000)?;
 
     for sequence in 1_u32..=100 {
@@ -88,17 +60,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             sequence
         );
         transport
-            .send_uninit_stable_payload_as::<NoZeroSensorFrame>(
-                UFrameMetadata::try_publish(topic.clone())?,
+            .send_stable_payload::<NoZeroSensorFrame, _>(
+                UFrameMetadata::publish(topic.clone())
+                    .with_native_payload_identity(
+                        StableContainerPayload::<NoZeroSensorFrame>::identity(&profile)?,
+                    )
+                    .build()?,
                 |frame| {
                     frame
-                        .header(|header| {
-                            header
-                                .case_id(1)
-                                .sequence(sequence)
-                                .logical_payload_len(4096)
-                                .finish()
-                        })?
+                        .into_initializer()
+                        .header(NoZeroSensorHeader {
+                            case_id: 1,
+                            sequence,
+                            logical_payload_len: 4096,
+                        })
                         .checksum(checksum)
                         .payload_fill(0x5a)
                         .finish()
